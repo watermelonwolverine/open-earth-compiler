@@ -1,8 +1,8 @@
 #ifndef DIALECT_STENCIL_STENCILDIALECT_H
 #define DIALECT_STENCIL_STENCILDIALECT_H
 
-#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <cstdint>
 
 namespace mlir {
@@ -17,7 +17,7 @@ constexpr static int kKDimension = 2;
 constexpr static int64_t kIndexSize = 3;
 
 // Index type used to store offsets and bounds
-typedef SmallVector<int64_t, kIndexSize> Index;
+typedef llvm::SmallVector<int64_t, kIndexSize> Index;
 
 class StencilDialect : public Dialect {
 public:
@@ -32,7 +32,7 @@ public:
   static StringRef getTempTypeName() { return "temp"; }
   static StringRef getResultTypeName() { return "result"; }
 
-  static bool isStencilProgram(FuncOp funcOp) {
+  static bool isStencilProgram(func::FuncOp funcOp) {
     return !!funcOp->getAttr(getStencilProgramAttrName());
   }
 

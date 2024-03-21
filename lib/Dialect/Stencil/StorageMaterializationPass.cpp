@@ -4,8 +4,6 @@
 #include "Dialect/Stencil/StencilTypes.h"
 #include "Dialect/Stencil/StencilUtils.h"
 #include "PassDetail.h"
-#include "mlir/Dialect/SCF/SCF.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -20,9 +18,9 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
-#include "mlir/Transforms/Utils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/Casting.h"
 #include <cstdint>
 
 using namespace mlir;
@@ -77,12 +75,13 @@ struct ApplyOpRewrite : public StorageMaterializationPattern<stencil::ApplyOp> {
         })) {
       // Clone the apply op and move the body
       auto clonedOp = rewriter.cloneWithoutRegions(applyOp);
-      rewriter.inlineRegionBefore(applyOp.region(), clonedOp.region(),
-                                  clonedOp.region().begin());
+      rewriter.inlineRegionBefore(applyOp.getRegion(), clonedOp.getRegion(),
+                                  clonedOp.getRegion().begin());
 
       // Introduce a buffer on every result connected to another apply
-      introduceResultBuffers(applyOp, clonedOp, rewriter);
-      return success();
+      // TODO check
+      return introduceResultBuffers(applyOp, clonedOp, rewriter);
+
     }
     return failure();
   }
@@ -103,8 +102,8 @@ struct CombineOpRewrite
       auto clonedOp = rewriter.clone(*combineOp.getOperation());
 
       // Introduce a buffer on every result connected to another apply
-      introduceResultBuffers(combineOp, clonedOp, rewriter);
-      return success();
+      // TODO check
+      return introduceResultBuffers(combineOp, clonedOp, rewriter);
     }
     return failure();
   }
@@ -113,25 +112,28 @@ struct CombineOpRewrite
 struct StorageMaterializationPass
     : public StorageMaterializationPassBase<StorageMaterializationPass> {
 
-  void runOnFunction() override;
+  void runOnOperation() override;
 };
 
-void StorageMaterializationPass::runOnFunction() {
-  FuncOp funcOp = getFunction();
+void StorageMaterializationPass::runOnOperation() {
+  func::FuncOp funcOp = getOperation();
 
   // Only run on functions marked as stencil programs
   if (!StencilDialect::isStencilProgram(funcOp))
     return;
 
   // Poppulate the pattern list depending on the config
-  OwningRewritePatternList patterns;
+  RewritePatternSet patterns(&getContext());
   patterns.insert<ApplyOpRewrite, CombineOpRewrite>(&getContext());
+  #pragma clang diagnostic push
+  #pragma clang diagnostic ignored "-Wunused-value"
   applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+  #pragma clang diagnostic pop
 }
 
 } // namespace
 
-std::unique_ptr<OperationPass<FuncOp>>
-mlir::createStorageMaterializationPass() {
+std::unique_ptr<OperationPass<func::FuncOp>>
+mlir::stencil::createStorageMaterializationPass() {
   return std::make_unique<StorageMaterializationPass>();
 }

@@ -27,27 +27,16 @@ def Stencil_Result : Type<Stencil_IsResultType, "a result">;
 
 def Stencil_Element : AnyTypeOf<[F32, F64]>;
 
-def Stencil_Index : Confined<I64ArrayAttr, [ArrayCount<3>]>;
-def Stencil_Loop : Confined<I64ArrayAttr, [ArrayCount<4>]>;
+def Stencil_Index : ConfinedAttr<I64ArrayAttr, [ArrayCount<3>]>;
+def Stencil_Loop : ConfinedAttr<I64ArrayAttr, [ArrayCount<4>]>;
 
 //===----------------------------------------------------------------------===//
 // Stencil Operation
 //===----------------------------------------------------------------------===//
 
 // Base class for all Stencil ops.
-class Stencil_Op<string mnemonic, list<OpTrait> traits = []> :
-    Op<Stencil_Dialect, mnemonic, traits> {
-
-    // For each Stencil op, the following static functions need to be defined in
-    // StencilOps.cpp:
-    //
-    // * static ParseResult parse<op-c++-class-name>(OpAsmParser &parser,
-    //                                               OperationState &state);
-    // * static void print(OpAsmPrinter &p, <op-c++-class-name> op)
-    // * static LogicalResult verify(<op-c++-class-name> op)
-    let parser = [{ return ::parse$cppClass(parser, result); }];
-    let printer = [{ ::print(*this, p); }];
-    let verifier = [{ return ::verify(*this); }];
+class Stencil_Op<string mnemonic, list<Trait> traits = []> :
+    Op<Stencil_Dialect, mnemonic, traits>{
 }
 
 #endif // Stencil_BASE

@@ -25,7 +25,7 @@ public:
 
         // Add field to the access set
         if (auto loadOp = dyn_cast<LoadOp>(curr)) {
-          accessSets[storeOp].insert(loadOp.field());
+          accessSets[storeOp].insert(loadOp.getField());
           continue;
         }
 
@@ -53,7 +53,7 @@ private:
 };
 
 struct ShapeOverlapPass : public ShapeOverlapPassBase<ShapeOverlapPass> {
-  void runOnFunction() override;
+  void runOnOperation() override;
 
 protected:
   bool areRangesOverlapping(ShapeOp shapeOp1, ShapeOp shapeOp2);
@@ -116,7 +116,7 @@ SmallVector<Value, 10> ShapeOverlapPass::splitGroupDimension(
   if (dim < 0) {
     SmallVector<Value, 10> tempValues;
     llvm::transform(group, std::back_inserter(tempValues),
-                    [](StoreOp storeOp) { return storeOp.temp(); });
+                    [](StoreOp storeOp) { return storeOp.getTemp(); });
     return tempValues;
   }
 
@@ -211,8 +211,8 @@ SmallVector<Value, 10> ShapeOverlapPass::splitGroupDimension(
 
 } // namespace
 
-void ShapeOverlapPass::runOnFunction() {
-  FuncOp funcOp = getFunction();
+void ShapeOverlapPass::runOnOperation() {
+  func::FuncOp funcOp = getOperation();
 
   // Only run on functions marked as stencil programs
   if (!stencil::StencilDialect::isStencilProgram(funcOp))
@@ -266,6 +266,6 @@ void ShapeOverlapPass::runOnFunction() {
   }
 }
 
-std::unique_ptr<OperationPass<FuncOp>> mlir::createShapeOverlapPass() {
+std::unique_ptr<OperationPass<func::FuncOp>> mlir::stencil::createShapeOverlapPass() {
   return std::make_unique<ShapeOverlapPass>();
 }

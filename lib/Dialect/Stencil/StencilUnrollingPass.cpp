@@ -4,11 +4,11 @@
 #include "Dialect/Stencil/StencilTypes.h"
 #include "Dialect/Stencil/StencilUtils.h"
 #include "PassDetail.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
-#include "mlir/IR/BlockAndValueMapping.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/PatternMatch.h"
@@ -16,7 +16,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/Passes.h"
-#include "mlir/Transforms/Utils.h"
+#include "llvm/Support/Casting.h"
 
 using namespace mlir;
 using namespace stencil;
@@ -26,7 +26,7 @@ namespace {
 struct StencilUnrollingPass
     : public StencilUnrollingPassBase<StencilUnrollingPass> {
 
-  void runOnFunction() override;
+  void runOnOperation() override;
 
 protected:
   void unrollStencilApply(stencil::ApplyOp applyOp);
@@ -41,7 +41,7 @@ stencil::ReturnOp StencilUnrollingPass::cloneBody(stencil::ApplyOp from,
                                                   stencil::ApplyOp to,
                                                   OpBuilder &builder) {
   // Setup the argument mapper
-  BlockAndValueMapping mapper;
+  IRMapping mapper;
   for (auto it : llvm::zip(from.getBody()->getArguments(),
                            to.getBody()->getArguments())) {
     mapper.map(std::get<0>(it), std::get<1>(it));
@@ -97,8 +97,8 @@ void StencilUnrollingPass::unrollStencilApply(stencil::ApplyOp applyOp) {
                               b.getI64ArrayAttr(unroll));
 }
 
-void StencilUnrollingPass::runOnFunction() {
-  FuncOp funcOp = getFunction();
+void StencilUnrollingPass::runOnOperation() {
+  func::FuncOp funcOp = getOperation();
   // Only run on functions marked as stencil programs
   if (!StencilDialect::isStencilProgram(funcOp))
     return;
@@ -122,6 +122,7 @@ void StencilUnrollingPass::runOnFunction() {
 
 } // namespace
 
-std::unique_ptr<OperationPass<FuncOp>> mlir::createStencilUnrollingPass() {
+std::unique_ptr<OperationPass<func::FuncOp>>
+mlir::stencil::createStencilUnrollingPass() {
   return std::make_unique<StencilUnrollingPass>();
 }

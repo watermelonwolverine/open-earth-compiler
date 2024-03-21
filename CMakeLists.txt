@@ -16,7 +16,7 @@ endif()
 project(oec-opt LANGUAGES CXX C)
 include(CheckLanguage)
 
-set(CMAKE_CXX_STANDARD 14 CACHE STRING "C++ standard to conform to")
+set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
 
 # setup llvm lit
 set(LLVM_LIT_ARGS "-sv" CACHE STRING "lit default options")

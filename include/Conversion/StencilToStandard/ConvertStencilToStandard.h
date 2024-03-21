@@ -87,7 +87,7 @@ public:
 void populateStencilToStdConversionPatterns(
     StencilTypeConverter &typeConveter, DenseMap<Value, Index> &valueToLB,
     DenseMap<Value, SmallVector<OpOperand *, 10>> &valueToReturnOpOperands,
-    OwningRewritePatternList &patterns);
+    RewritePatternSet &patterns);
 
 } // namespace stencil
 } // namespace mlir

@@ -11,11 +11,13 @@
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Casting.h"
 
 using namespace mlir;
 using namespace stencil;
 
-namespace {
+namespace mlir {
+namespace impl {
 
 /// This class computes for every stencil apply operand
 /// the minimal bounding box containing all access offsets
@@ -33,8 +35,9 @@ public:
       auto operation = applyOp.getOperation();
       // Compute mapping between operands and block arguments
       llvm::DenseMap<Value, Value> argToOperand;
-      for (size_t i = 0, e = applyOp.operands().size(); i != e; ++i) {
-        argToOperand[applyOp.getBody()->getArgument(i)] = applyOp.operands()[i];
+      for (size_t i = 0, e = applyOp.getOperands().size(); i != e; ++i) {
+        argToOperand[applyOp.getBody()->getArgument(i)] =
+            applyOp.getOperands()[i];
       }
       // Walk the access operations and update the extent
       applyOp.walk([&](ExtentOp extentOp) {
@@ -56,7 +59,7 @@ public:
       // Subtract the unroll factor minus one from the positive extent
       auto returnOp =
           cast<stencil::ReturnOp>(applyOp.getBody()->getTerminator());
-      if (returnOp.unroll().hasValue()) {
+      if (returnOp.getUnroll().has_value()) {
         auto unrollDim = returnOp.getUnrollDim();
         auto unrollFac = returnOp.getUnrollFac();
         // Limit the unroll factor to the loop length if available
@@ -91,7 +94,7 @@ private:
 
 struct ShapeInferencePass : public ShapeInferencePassBase<ShapeInferencePass> {
 
-  void runOnFunction() override;
+  void runOnOperation() override;
 
 protected:
   // Shape extension
@@ -109,9 +112,13 @@ protected:
   LogicalResult inferShapes(ShapeOp shapeOp, const AccessExtents &extents);
 };
 
+} // namespace impl
+} // namespace mlir
+
 /// Update the shape given updated bounds
-void ShapeInferencePass::updateShape(ShapeOp shapeOp, ArrayRef<int64_t> lb,
-                                     ArrayRef<int64_t> ub) {
+void mlir::impl::ShapeInferencePass::updateShape(ShapeOp shapeOp,
+                                                 ArrayRef<int64_t> lb,
+                                                 ArrayRef<int64_t> ub) {
   shapeOp.updateShape(lb, ub);
   // Update the region arguments of dependent shape operations
   // (needed for operations such as the stencil apply op)
@@ -122,9 +129,8 @@ void ShapeInferencePass::updateShape(ShapeOp shapeOp, ArrayRef<int64_t> lb,
 }
 
 /// Extend the loop bounds for the given use
-LogicalResult ShapeInferencePass::updateBounds(OpOperand &use,
-                                               const AccessExtents &extents,
-                                               Index &lower, Index &upper) {
+LogicalResult mlir::impl::ShapeInferencePass::updateBounds(
+    OpOperand &use, const AccessExtents &extents, Index &lower, Index &upper) {
   // Copy the bounds of store ops
   if (auto shapeOp = dyn_cast<ShapeOp>(use.getOwner())) {
     if (shapeOp.hasShape()) {
@@ -138,9 +144,11 @@ LogicalResult ShapeInferencePass::updateBounds(OpOperand &use,
       // Adjust the bounds if the shape is split into subdomains
       if (auto combineOp = dyn_cast<stencil::CombineOp>(use.getOwner())) {
         if (combineOp.isLowerOperand(use.getOperandNumber()))
-          ub[combineOp.dim()] = min(combineOp.getIndex(), ub[combineOp.dim()]);
+          ub[combineOp.getDim()] =
+              min(combineOp.getMyIndex(), ub[combineOp.getDim()]);
         if (combineOp.isUpperOperand(use.getOperandNumber()))
-          lb[combineOp.dim()] = max(combineOp.getIndex(), lb[combineOp.dim()]);
+          lb[combineOp.getDim()] =
+              max(combineOp.getMyIndex(), lb[combineOp.getDim()]);
       }
 
       // Verify the shape is not empty
@@ -163,8 +171,9 @@ LogicalResult ShapeInferencePass::updateBounds(OpOperand &use,
 }
 
 /// Infer the shape as the maximum bounding box the consumer shapes
-LogicalResult ShapeInferencePass::inferShapes(ShapeOp shapeOp,
-                                              const AccessExtents &extents) {
+LogicalResult
+mlir::impl::ShapeInferencePass::inferShapes(ShapeOp shapeOp,
+                                            const AccessExtents &extents) {
   Index lb, ub;
   // Iterate over all uses and adjust the bounds
   for (auto result : shapeOp.getOperation()->getResults()) {
@@ -181,7 +190,8 @@ LogicalResult ShapeInferencePass::inferShapes(ShapeOp shapeOp,
 
 /// Compute the shape for a given result of a defining op
 std::tuple<Index, Index>
-ShapeInferencePass::getResultShape(Operation *definingOp, Value result) {
+mlir::impl::ShapeInferencePass::getResultShape(Operation *definingOp,
+                                               Value result) {
   // If the defining op is an apply op return its shape
   if (auto applyOp = dyn_cast<stencil::ApplyOp>(definingOp)) {
     auto shapeOp = cast<ShapeOp>(applyOp.getOperation());
@@ -203,25 +213,25 @@ ShapeInferencePass::getResultShape(Operation *definingOp, Value result) {
     if (auto num = combineOp.getLowerOperandNumber(resultNumber)) {
       Index lb1, lb2, ub1, ub2;
       std::tie(lb1, ub1) =
-          getResultShape(combineOp.lower()[num.getValue()].getDefiningOp(),
-                         combineOp.lower()[num.getValue()]);
+          getResultShape(combineOp.getLower()[num.value()].getDefiningOp(),
+                         combineOp.getLower()[num.value()]);
       std::tie(lb2, ub2) =
-          getResultShape(combineOp.upper()[num.getValue()].getDefiningOp(),
-                         combineOp.upper()[num.getValue()]);
+          getResultShape(combineOp.getUpper()[num.value()].getDefiningOp(),
+                         combineOp.getUpper()[num.value()]);
       return std::make_tuple(applyFunElementWise(lb1, lb2, min),
                              applyFunElementWise(ub1, ub2, max));
     }
     // If the result is a lower extra result compute the shape recursively
     if (auto num = combineOp.getLowerExtraOperandNumber(resultNumber)) {
       return getResultShape(
-          combineOp.lowerext()[num.getValue()].getDefiningOp(),
-          combineOp.lowerext()[num.getValue()]);
+          combineOp.getLowerext()[num.value()].getDefiningOp(),
+          combineOp.getLowerext()[num.value()]);
     }
     // If the result is an upper extra result compute the shape recursively
     if (auto num = combineOp.getUpperExtraOperandNumber(resultNumber)) {
       return getResultShape(
-          combineOp.upperext()[num.getValue()].getDefiningOp(),
-          combineOp.upperext()[num.getValue()]);
+          combineOp.getUpperext()[num.value()].getDefiningOp(),
+          combineOp.getUpperext()[num.value()]);
     }
   }
   llvm_unreachable("expected an apply or a combine op");
@@ -229,9 +239,8 @@ ShapeInferencePass::getResultShape(Operation *definingOp, Value result) {
 }
 
 /// Update the shape given the old and the new shape op
-void ShapeInferencePass::updateStorageShape(ShapeOp shapeOp,
-                                            ArrayRef<int64_t> lb,
-                                            ArrayRef<std::int64_t> ub) {
+void mlir::impl::ShapeInferencePass::updateStorageShape(
+    ShapeOp shapeOp, ArrayRef<int64_t> lb, ArrayRef<std::int64_t> ub) {
   // Compute the update bounds
   auto lower = applyFunElementWise(shapeOp.getLB(), lb, min);
   auto upper = applyFunElementWise(shapeOp.getUB(), ub, max);
@@ -239,8 +248,8 @@ void ShapeInferencePass::updateStorageShape(ShapeOp shapeOp,
 }
 
 /// Check it is a valid shape extension
-bool ShapeInferencePass::isShapeExtension(ShapeOp current, ArrayRef<int64_t> lb,
-                                          ArrayRef<std::int64_t> ub) {
+bool mlir::impl::ShapeInferencePass::isShapeExtension(
+    ShapeOp current, ArrayRef<int64_t> lb, ArrayRef<std::int64_t> ub) {
   if (llvm::all_of(llvm::zip(lb, current.getLB()),
                    [](std::tuple<int64_t, int64_t> x) {
                      return std::get<0>(x) <= std::get<1>(x);
@@ -254,8 +263,9 @@ bool ShapeInferencePass::isShapeExtension(ShapeOp current, ArrayRef<int64_t> lb,
 }
 
 /// Update the storage shape if needed
-LogicalResult ShapeInferencePass::extendStorageShape(ShapeOp shapeOp,
-                                                     Value temp) {
+LogicalResult
+mlir::impl::ShapeInferencePass::extendStorageShape(ShapeOp shapeOp,
+                                                   Value temp) {
   Index lb, ub;
   std::tie(lb, ub) = getResultShape(temp.getDefiningOp(), temp);
   // Update the shape
@@ -272,10 +282,8 @@ LogicalResult ShapeInferencePass::extendStorageShape(ShapeOp shapeOp,
   return failure();
 }
 
-} // namespace
-
-void ShapeInferencePass::runOnFunction() {
-  FuncOp funcOp = getFunction();
+void mlir::impl::ShapeInferencePass::runOnOperation() {
+  func::FuncOp funcOp = getOperation();
 
   // Only run on functions marked as stencil programs
   if (!stencil::StencilDialect::isStencilProgram(funcOp))
@@ -304,17 +312,23 @@ void ShapeInferencePass::runOnFunction() {
   if (extendStorage) {
     // Update the store shapes and issue a warning
     funcOp.walk([&](stencil::StoreOp storeOp) {
-      if (succeeded(extendStorageShape(storeOp.getOperation(), storeOp.temp())))
+      if (succeeded(extendStorageShape(
+              llvm::cast<ShapeOp>(storeOp.getOperation()), storeOp.getTemp())))
         storeOp.emitWarning(
             "adapted shape to match the write set of the defining op");
     });
     // Update the buffer shapes
     funcOp.walk([&](stencil::BufferOp bufferOp) {
-      extendStorageShape(bufferOp.getOperation(), bufferOp.temp());
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-value"
+      extendStorageShape(llvm::cast<ShapeOp>(bufferOp.getOperation()),
+                         bufferOp.getTemp());
+#pragma clang diagnostic pop
     });
   }
 }
 
-std::unique_ptr<OperationPass<FuncOp>> mlir::createShapeInferencePass() {
-  return std::make_unique<ShapeInferencePass>();
+std::unique_ptr<OperationPass<func::FuncOp>>
+mlir::stencil::createShapeInferencePass() {
+  return std::make_unique<impl::ShapeInferencePass>();
 }

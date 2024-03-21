@@ -60,7 +60,7 @@ func @load(%in1 : !stencil.field<?x?x?xf64>, %in2 : !stencil.field<?x?x?xf64>) {
 // CHECK-LABEL: func @buffer() {
 func @buffer() {
   %0 = "stencil.apply"() ({
-    %1 = constant 1.0 : f64
+    %1 = arith.constant 1.0 : f64
     %2 = "stencil.store_result"(%1) : (f64) -> !stencil.result<f64>
     "stencil.return"(%2) : (!stencil.result<f64>) -> ()
   }) : () -> !stencil.temp<?x?x?xf64>
@@ -74,12 +74,12 @@ func @buffer() {
 // CHECK-LABEL: func @combine() {
 func @combine() {
   %0 = "stencil.apply"() ({
-    %3 = constant 1.0 : f64
+    %3 = arith.constant 1.0 : f64
     %4 = "stencil.store_result"(%3) : (f64) -> !stencil.result<f64>
     "stencil.return"(%4) : (!stencil.result<f64>) -> ()
   }) : () -> !stencil.temp<?x?x?xf64>
   %1 = "stencil.apply"() ({
-    %3 = constant 1.0 : f64
+    %3 = arith.constant 1.0 : f64
     %4 = "stencil.store_result"(%3) : (f64) -> !stencil.result<f64>
     "stencil.return"(%4) : (!stencil.result<f64>) -> ()
   }) : () -> !stencil.temp<?x?x?xf64>
@@ -93,17 +93,17 @@ func @combine() {
 // CHECK-LABEL: func @combine_extra() {
 func @combine_extra() {
   %0 = "stencil.apply"() ({
-    %5 = constant 1.0 : f64
+    %5 = arith.constant 1.0 : f64
     %6 = "stencil.store_result"(%5) : (f64) -> !stencil.result<f64>
     "stencil.return"(%6) : (!stencil.result<f64>) -> ()
   }) : () -> !stencil.temp<?x?x?xf64>
   %1 = "stencil.apply"() ({
-    %5 = constant 1.0 : f64
+    %5 = arith.constant 1.0 : f64
     %6 = "stencil.store_result"(%5) : (f64) -> !stencil.result<f64>
     "stencil.return"(%6) : (!stencil.result<f64>) -> ()
   }) : () -> !stencil.temp<?x?x?xf64>
   %2 = "stencil.apply"() ({
-    %5 = constant 1.0 : f64
+    %5 = arith.constant 1.0 : f64
     %6 = "stencil.store_result"(%5) : (f64) -> !stencil.result<f64>
     "stencil.return"(%6) : (!stencil.result<f64>) -> ()
   }) : () -> !stencil.temp<?x?x?xf64>
@@ -118,7 +118,7 @@ func @combine_extra() {
 func @store(%out : !stencil.field<?x?x?xf64>) {
   %0 = "stencil.cast"(%out) {lb=[-3,-3,0], ub=[67,67,60]} : (!stencil.field<?x?x?xf64>) -> (!stencil.field<70x70x60xf64>) 
   %1 = "stencil.apply"() ({
-    %1 = constant 1.0 : f64
+    %1 = arith.constant 1.0 : f64
     %2 = "stencil.store_result"(%1) : (f64) -> !stencil.result<f64>
     "stencil.return"(%2) : (!stencil.result<f64>) -> ()
   }) : () -> !stencil.temp<?x?x?xf64>

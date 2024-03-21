@@ -4,9 +4,7 @@
 #include "Dialect/Stencil/StencilTypes.h"
 #include "Dialect/Stencil/StencilUtils.h"
 #include "PassDetail.h"
-#include "mlir/Dialect/SCF/SCF.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
-#include "mlir/IR/BlockAndValueMapping.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -21,7 +19,6 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
-#include "mlir/Transforms/Utils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -80,8 +77,8 @@ struct FuseRewrite : public CombineOpPattern {
 
     // Introduce a new apply op
     auto newOp = rewriter.create<stencil::ApplyOp>(
-        combineOp.getLoc(), newResultTypes, newOperands, applyOp1.lb(),
-        applyOp1.ub());
+        combineOp.getLoc(), newResultTypes, newOperands, applyOp1.getLb(),
+        applyOp1.getUb());
     rewriter.mergeBlocks(
         applyOp1.getBody(), newOp.getBody(),
         newOp.getBody()->getArguments().take_front(applyOp1.getNumOperands()));
@@ -99,7 +96,7 @@ struct FuseRewrite : public CombineOpPattern {
     // Introduce a new return op
     rewriter.setInsertionPointToEnd(newOp.getBody());
     rewriter.create<stencil::ReturnOp>(combineOp.getLoc(), newReturnOperands,
-                                       returnOp1.unroll());
+                                       returnOp1.getUnroll());
     rewriter.eraseOp(returnOp1);
     rewriter.eraseOp(returnOp2);
 
@@ -132,38 +129,38 @@ struct EmptyStoreRewrite : public CombineOpPattern {
   LogicalResult introduceEmptyStores(stencil::CombineOp combineOp,
                                      PatternRewriter &rewriter) const {
     // Update the combine op
-    SmallVector<Value, 10> newLowerOperands = combineOp.lower();
-    SmallVector<Value, 10> newUpperOperands = combineOp.upper();
+    SmallVector<Value, 10> newLowerOperands = combineOp.getLower();
+    SmallVector<Value, 10> newUpperOperands = combineOp.getUpper();
 
     // Complement the lower extra operands
-    if (combineOp.lowerext().size() != 0) {
-      newLowerOperands.append(combineOp.lowerext().begin(),
-                              combineOp.lowerext().end());
+    if (combineOp.getLowerext().size() != 0) {
+      newLowerOperands.append(combineOp.getLowerext().begin(),
+                              combineOp.getLowerext().end());
       // Introduce an empty apply for the upper operands
-      auto emptyOp = createEmptyApply(combineOp, combineOp.getIndex(),
+      auto emptyOp = createEmptyApply(combineOp, combineOp.getMyIndex(),
                                       std::numeric_limits<int64_t>::max(),
-                                      combineOp.lowerext(), rewriter);
+                                      combineOp.getLowerext(), rewriter);
       newUpperOperands.append(emptyOp.getResults().begin(),
                               emptyOp.getResults().end());
     }
 
     // Complement the upper extra operands
-    if (combineOp.upperext().size() != 0) {
-      newUpperOperands.append(combineOp.upperext().begin(),
-                              combineOp.upperext().end());
+    if (combineOp.getUpperext().size() != 0) {
+      newUpperOperands.append(combineOp.getUpperext().begin(),
+                              combineOp.getUpperext().end());
       // Introduce an empty apply for the lower operands
       auto emptyOp = createEmptyApply(
-          combineOp, std::numeric_limits<int64_t>::min(), combineOp.getIndex(),
-          combineOp.upperext(), rewriter);
+          combineOp, std::numeric_limits<int64_t>::min(), combineOp.getMyIndex(),
+          combineOp.getUpperext(), rewriter);
       newLowerOperands.append(emptyOp.getResults().begin(),
                               emptyOp.getResults().end());
     }
 
     // Introduce a new stencil combine operation that has no extra operands
     auto newOp = rewriter.create<stencil::CombineOp>(
-        combineOp.getLoc(), combineOp.getResultTypes(), combineOp.dim(),
-        combineOp.getIndex(), newLowerOperands, newUpperOperands, ValueRange(),
-        ValueRange(), combineOp.lbAttr(), combineOp.ubAttr());
+        combineOp.getLoc(), combineOp.getResultTypes(), combineOp.getDim(),
+        combineOp.getMyIndex(), newLowerOperands, newUpperOperands, ValueRange(),
+        ValueRange(), combineOp.getLbAttr(), combineOp.getUbAttr());
 
     // Replace the combine operation
     rewriter.replaceOp(combineOp, newOp.getResults());
@@ -173,7 +170,7 @@ struct EmptyStoreRewrite : public CombineOpPattern {
   LogicalResult matchAndRewrite(stencil::CombineOp combineOp,
                                 PatternRewriter &rewriter) const override {
     // Handling extra operands is not needed
-    if (combineOp.lowerext().empty() && combineOp.upperext().empty())
+    if (combineOp.getLowerext().empty() && combineOp.getUpperext().empty())
       return failure();
 
     // Introduce empty stores if all defining ops are apply ops
@@ -229,18 +226,18 @@ struct IfElseRewrite : public CombineOpPattern {
 
     // Create a new apply op that updates the lower and upper domains
     auto newOp = rewriter.create<stencil::ApplyOp>(
-        loc, combineOp.getResultTypes(), newOperands, combineOp.lb(),
-        combineOp.ub());
+        loc, combineOp.getResultTypes(), newOperands, combineOp.getLb(),
+        combineOp.getUb());
     rewriter.setInsertionPointToStart(newOp.getBody());
 
     // Introduce the branch condition
     SmallVector<int64_t, 3> offset(kIndexSize, 0);
     auto indexOp =
-        rewriter.create<stencil::IndexOp>(loc, combineOp.dim(), offset);
-    auto constOp = rewriter.create<ConstantOp>(
-        loc, rewriter.getIndexAttr(combineOp.getIndex()));
+        rewriter.create<stencil::IndexOp>(loc, combineOp.getDim(), offset);
+    auto constOp = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getIndexAttr(combineOp.getMyIndex()));
     auto cmpOp =
-        rewriter.create<CmpIOp>(loc, CmpIPredicate::ult, indexOp, constOp);
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, indexOp, constOp);
 
     // Get the return operations and check to unroll factors match
     auto lowerReturnOp =
@@ -263,17 +260,17 @@ struct IfElseRewrite : public CombineOpPattern {
     auto ifOp = rewriter.create<scf::IfOp>(loc, lowerReturnOp.getOperandTypes(),
                                            cmpOp, true);
     rewriter.create<stencil::ReturnOp>(loc, ifOp.getResults(),
-                                       lowerReturnOp.unroll());
+                                       lowerReturnOp.getUnroll());
 
     // Replace the return ops by yield ops
     rewriter.setInsertionPoint(lowerReturnOp);
     rewriter.replaceOpWithNewOp<scf::YieldOp>(
         lowerReturnOp,
-        permuteReturnOpOperands(lowerOp, combineOp.lower(), lowerReturnOp));
+        permuteReturnOpOperands(lowerOp, combineOp.getLower(), lowerReturnOp));
     rewriter.setInsertionPoint(upperReturnOp);
     rewriter.replaceOpWithNewOp<scf::YieldOp>(
         upperReturnOp,
-        permuteReturnOpOperands(upperOp, combineOp.upper(), upperReturnOp));
+        permuteReturnOpOperands(upperOp, combineOp.getUpper(), upperReturnOp));
 
     // Move the computation to the new apply operation
     rewriter.mergeBlocks(
@@ -293,7 +290,7 @@ struct IfElseRewrite : public CombineOpPattern {
   LogicalResult matchAndRewrite(stencil::CombineOp combineOp,
                                 PatternRewriter &rewriter) const override {
     // Handle the extra operands first
-    if (!combineOp.lowerext().empty() || !combineOp.upperext().empty())
+    if (!combineOp.getLowerext().empty() || !combineOp.getUpperext().empty())
       return failure();
 
     // Handle multiple input operations first
@@ -333,11 +330,11 @@ struct InternalIfElseRewrite : public IfElseRewrite {
 struct CombineToIfElsePass
     : public CombineToIfElsePassBase<CombineToIfElsePass> {
 
-  void runOnFunction() override;
+  void runOnOperation() override;
 };
 
-void CombineToIfElsePass::runOnFunction() {
-  FuncOp funcOp = getFunction();
+void CombineToIfElsePass::runOnOperation() {
+  func::FuncOp funcOp = getOperation();
 
   // Only run on functions marked as stencil programs
   if (!StencilDialect::isStencilProgram(funcOp))
@@ -357,7 +354,7 @@ void CombineToIfElsePass::runOnFunction() {
   }
 
   // Populate the pattern list depending on the config
-  OwningRewritePatternList patterns;
+  RewritePatternSet patterns(&getContext());
   if (prepareOnly) {
     patterns.insert<EmptyStoreRewrite, FuseRewrite>(&getContext());
   } else if (internalOnly) {
@@ -366,11 +363,14 @@ void CombineToIfElsePass::runOnFunction() {
     patterns.insert<IfElseRewrite, EmptyStoreRewrite, FuseRewrite>(
         &getContext());
   }
+  #pragma clang diagnostic push
+  #pragma clang diagnostic ignored "-Wunused-value"
   applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+  #pragma  clang diagnostic pop
 }
 
 } // namespace
 
-std::unique_ptr<OperationPass<FuncOp>> mlir::createCombineToIfElsePass() {
+std::unique_ptr<OperationPass<func::FuncOp>> mlir::stencil::createCombineToIfElsePass() {
   return std::make_unique<CombineToIfElsePass>();
 }

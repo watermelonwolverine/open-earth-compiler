@@ -12,6 +12,10 @@
 #include <cstdint>
 #include <numeric>
 
+// For h.inc includes
+#include "mlir/IR/Operation.h"
+//
+
 namespace mlir {
 namespace stencil {
 #include "Dialect/Stencil/StencilOpsInterfaces.h.inc"

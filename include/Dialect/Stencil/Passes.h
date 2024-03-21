@@ -1,26 +1,27 @@
 #ifndef DIALECT_STENCIL_PASSES_H
 #define DIALECT_STENCIL_PASSES_H
 
-
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {
+namespace stencil {
 
-std::unique_ptr<OperationPass<FuncOp>> createDomainSplitPass();
+std::unique_ptr<OperationPass<func::FuncOp>> createDomainSplitPass();
 
-std::unique_ptr<OperationPass<FuncOp>> createStencilInliningPass();
+std::unique_ptr<OperationPass<func::FuncOp>> createStencilInliningPass();
 
-std::unique_ptr<OperationPass<FuncOp>> createStencilUnrollingPass();
+std::unique_ptr<OperationPass<func::FuncOp>> createStencilUnrollingPass();
 
-std::unique_ptr<OperationPass<FuncOp>> createCombineToIfElsePass();
+std::unique_ptr<OperationPass<func::FuncOp>> createCombineToIfElsePass();
 
-std::unique_ptr<OperationPass<FuncOp>> createShapeInferencePass();
+std::unique_ptr<OperationPass<func::FuncOp>> createShapeInferencePass();
 
-std::unique_ptr<OperationPass<FuncOp>> createShapeOverlapPass();
+std::unique_ptr<OperationPass<func::FuncOp>> createShapeOverlapPass();
 
-std::unique_ptr<OperationPass<FuncOp>> createStorageMaterializationPass();
+std::unique_ptr<OperationPass<func::FuncOp>> createStorageMaterializationPass();
 
-std::unique_ptr<OperationPass<FuncOp>> createPeelOddIterationsPass();
+std::unique_ptr<OperationPass<func::FuncOp>> createPeelOddIterationsPass();
 
 //===----------------------------------------------------------------------===//
 // Registration
@@ -30,6 +31,7 @@ std::unique_ptr<OperationPass<FuncOp>> createPeelOddIterationsPass();
 #define GEN_PASS_REGISTRATION
 #include "Dialect/Stencil/Passes.h.inc"
 
+} // namespace stencil
 } // namespace mlir
 
 #endif // DIALECT_STENCIL_PASSES_H

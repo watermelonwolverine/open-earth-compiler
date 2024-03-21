@@ -12,10 +12,70 @@ namespace mlir {
 namespace stencil {
 
 namespace detail {
-struct GridTypeStorage;
-struct FieldTypeStorage;
-struct TempTypeStorage;
-struct ResultTypeStorage;
+struct GridTypeStorage : public TypeStorage {
+  GridTypeStorage(Type elementTy, size_t size, const int64_t *shape)
+      : TypeStorage(), elementType(elementTy), size(size), shape(shape) {}
+
+  /// Hash key used for uniquing
+  using KeyTy = std::pair<Type, ArrayRef<int64_t>>;
+
+  bool operator==(const KeyTy &key) const {
+    return key == KeyTy(elementType, getShape());
+  }
+
+  Type getElementType() const { return elementType; }
+  ArrayRef<int64_t> getShape() const { return {shape, size}; }
+
+  Type elementType;
+  const size_t size;
+  const int64_t *shape;
+};
+
+struct FieldTypeStorage : public GridTypeStorage {
+  using GridTypeStorage::GridTypeStorage;
+
+  /// Construction
+  static FieldTypeStorage *construct(TypeStorageAllocator &allocator,
+                                     const KeyTy &key) {
+    // Copy the allocation into the bump pointer.
+    ArrayRef<int64_t> shape = allocator.copyInto(key.second);
+
+    return new (allocator.allocate<FieldTypeStorage>())
+        FieldTypeStorage(key.first, shape.size(), shape.data());
+  }
+};
+
+struct TempTypeStorage : public GridTypeStorage {
+  using GridTypeStorage::GridTypeStorage;
+
+  /// Construction
+  static TempTypeStorage *construct(TypeStorageAllocator &allocator,
+                                    const KeyTy &key) {
+    // Copy the allocation into the bump pointer.
+    ArrayRef<int64_t> shape = allocator.copyInto(key.second);
+
+    return new (allocator.allocate<TempTypeStorage>())
+        TempTypeStorage(key.first, shape.size(), shape.data());
+  }
+};
+struct ResultTypeStorage : public TypeStorage {
+  ResultTypeStorage(Type resultType) : TypeStorage(), resultType(resultType) {}
+
+  /// Hash key used for uniquing
+  using KeyTy = Type;
+
+  bool operator==(const KeyTy &key) const { return key == resultType; }
+
+  Type getResultType() const { return resultType; }
+
+  /// Construction
+  static ResultTypeStorage *construct(TypeStorageAllocator &allocator,
+                                      const KeyTy &key) {
+    return new (allocator.allocate<ResultTypeStorage>()) ResultTypeStorage(key);
+  }
+
+  Type resultType;
+};
 } // namespace detail
 
 //===----------------------------------------------------------------------===//
@@ -31,7 +91,7 @@ public:
   static bool classof(Type type);
 
   /// Constants used to mark dynamic size or scalarized dimensions
-  static constexpr int64_t kDynamicDimension = -1;
+  static constexpr int64_t kDynamicDimension = ShapedType::kDynamic;
   static constexpr int64_t kScalarDimension = 0;
 
   /// Return the element type
@@ -82,7 +142,7 @@ class FieldType
     : public Type::TypeBase<FieldType, GridType, detail::FieldTypeStorage> {
 public:
   using Base::Base;
-
+  static constexpr ::llvm::StringLiteral name = "stencil.field";
   static FieldType get(Type elementType, ArrayRef<int64_t> shape);
 };
 
@@ -95,7 +155,7 @@ class TempType
     : public Type::TypeBase<TempType, GridType, detail::TempTypeStorage> {
 public:
   using Base::Base;
-
+  static constexpr ::llvm::StringLiteral name = "stencil.temp";
   static TempType get(Type elementType, ArrayRef<int64_t> shape);
 
   /// Get a statically sized temp type
@@ -115,7 +175,7 @@ class ResultType
     : public Type::TypeBase<ResultType, Type, detail::ResultTypeStorage> {
 public:
   using Base::Base;
-
+  static constexpr ::llvm::StringLiteral name = "stencil.result";
   static ResultType get(Type resultType);
 
   /// Return the result type

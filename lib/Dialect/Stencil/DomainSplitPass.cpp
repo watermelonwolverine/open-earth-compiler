@@ -2,8 +2,6 @@
 #include "Dialect/Stencil/StencilDialect.h"
 #include "Dialect/Stencil/StencilOps.h"
 #include "PassDetail.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
-#include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -16,7 +14,7 @@
 using namespace mlir;
 using namespace stencil;
 
-void splitOnDomains(FuncOp funcOp) {
+void splitOnDomains(func::FuncOp funcOp) {
   // Maps to remember domains associated with every operation
   llvm::DenseMap<Operation *, Index> negative;
   llvm::DenseMap<Operation *, Index> positive;
@@ -45,10 +43,10 @@ void splitOnDomains(FuncOp funcOp) {
                                                 positive[use.getOwner()]};
           if (auto combineOp = dyn_cast<CombineOp>(use.getOwner())) {
             if (combineOp.isLowerOperand(use.getOperandNumber())) {
-              std::get<1>(useDomain)[combineOp.dim()] = combineOp.index();
+              std::get<1>(useDomain)[combineOp.getDim()] = combineOp.getIndex();
             }
             if (combineOp.isUpperOperand(use.getOperandNumber())) {
-              std::get<0>(useDomain)[combineOp.dim()] = combineOp.index();
+              std::get<0>(useDomain)[combineOp.getDim()] = combineOp.getIndex();
             }
           }
           // Check if domain of this use of this result already exists
@@ -104,7 +102,7 @@ void splitOnDomains(FuncOp funcOp) {
   }
 }
 
-void splitOnLastCombines(FuncOp funcOp) {
+void splitOnLastCombines(func::FuncOp funcOp) {
   // Map to remember the closest downstream stencil combine for every operation
   llvm::DenseMap<Operation *, Operation *> lastCombine;
 
@@ -182,11 +180,11 @@ namespace {
 
 struct DomainSplitPass : public DomainSplitPassBase<DomainSplitPass> {
 
-  void runOnFunction() override;
+  void runOnOperation() override;
 };
 
-void DomainSplitPass::runOnFunction() {
-  FuncOp funcOp = getFunction();
+void DomainSplitPass::runOnOperation() {
+  func::FuncOp funcOp = getOperation();
 
   // Only run on functions marked as stencil programs
   if (!StencilDialect::isStencilProgram(funcOp))
@@ -211,6 +209,6 @@ void DomainSplitPass::runOnFunction() {
 
 } // namespace
 
-std::unique_ptr<OperationPass<FuncOp>> mlir::createDomainSplitPass() {
+std::unique_ptr<OperationPass<func::FuncOp>> mlir::stencil::createDomainSplitPass() {
   return std::make_unique<DomainSplitPass>();
 }

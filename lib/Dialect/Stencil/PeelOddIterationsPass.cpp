@@ -4,7 +4,7 @@
 #include "Dialect/Stencil/StencilTypes.h"
 #include "Dialect/Stencil/StencilUtils.h"
 #include "PassDetail.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
+
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -19,7 +19,7 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
-#include "mlir/Transforms/Utils.h"
+
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -50,7 +50,7 @@ struct PeelRewrite : public stencil::ApplyOpPattern {
       if (unrollIdx < leftCount || unrollIdx >= rightCount) {
         auto resultOp = en.value().getDefiningOp();
         numOfOperands += resultOp->getNumOperands();
-        rewriter.updateRootInPlace(resultOp,
+        rewriter.modifyOpInPlace(resultOp,
                                    [&]() { resultOp->setOperands({}); });
       }
     }
@@ -98,13 +98,16 @@ struct PeelRewrite : public stencil::ApplyOpPattern {
 
       // Remove stores that exceed the domain
       auto peelOp = peelSize < 0 ? leftOp : rightOp;
-      makePeelIteration(peelOp, peelSize, rewriter);
+
+      // TODO check
+      if(failed(makePeelIteration(peelOp, peelSize, rewriter)))
+        return failure();
 
       // Introduce a stencil combine to replace the apply operation
       auto combineOp = rewriter.create<stencil::CombineOp>(
           applyOp.getLoc(), applyOp.getResultTypes(), unrollDim, split,
           leftOp.getResults(), rightOp.getResults(), ValueRange(), ValueRange(),
-          applyOp.lbAttr(), applyOp.ubAttr());
+          applyOp.getLbAttr(), applyOp.getUbAttr());
       rewriter.replaceOp(applyOp, combineOp.getResults());
       return success();
     }
@@ -144,16 +147,16 @@ struct FuseRewrite : public stencil::CombineOpPattern {
 
   Operation *getLowerDefiningOp(stencil::CombineOp combineOp) const {
     // Get the lower defining operation
-    if (combineOp.lower().empty())
+    if (combineOp.getLower().empty())
       return nullptr;
-    return combineOp.lower().front().getDefiningOp();
+    return combineOp.getLower().front().getDefiningOp();
   }
 
   Operation *getUpperDefiningOp(stencil::CombineOp combineOp) const {
     // Get the upper defining operation
-    if (combineOp.upper().empty())
+    if (combineOp.getUpper().empty())
       return nullptr;
-    return combineOp.upper().front().getDefiningOp();
+    return combineOp.getUpper().front().getDefiningOp();
   }
 
   // Create an apply operation that fuses the left and right peel iterations
@@ -171,13 +174,13 @@ struct FuseRewrite : public stencil::CombineOpPattern {
         cast<stencil::ReturnOp>(leftOp.getBody()->getTerminator());
     auto rightReturnOp =
         cast<stencil::ReturnOp>(rightOp.getBody()->getTerminator());
-    assert(leftReturnOp.unroll() == rightReturnOp.unroll() &&
+    assert(leftReturnOp.getUnroll() == rightReturnOp.getUnroll() &&
            "expected unroll of the left and right apply to match");
 
     // Create a new operation that has the size of
     auto newOp = rewriter.create<stencil::ApplyOp>(
         rewriter.getFusedLoc({leftOp.getLoc(), rightOp.getLoc()}),
-        leftOp.getResultTypes(), newOperands, leftOp.lb(), rightOp.ub());
+        leftOp.getResultTypes(), newOperands, leftOp.getLb(), rightOp.getUb());
     rewriter.mergeBlocks(
         leftOp.getBody(), newOp.getBody(),
         newOp.getBody()->getArguments().take_front(leftOp.getNumOperands()));
@@ -197,7 +200,7 @@ struct FuseRewrite : public stencil::CombineOpPattern {
       if (en.index() % unrollFac < split)
         newReturnOperands[en.index()] = en.value();
     }
-    rewriter.updateRootInPlace(rightReturnOp, [&]() {
+    rewriter.modifyOpInPlace(rightReturnOp, [&]() {
       rightReturnOp->setOperands(newReturnOperands);
     });
     rewriter.eraseOp(leftReturnOp);
@@ -270,14 +273,14 @@ struct FuseRewrite : public stencil::CombineOpPattern {
     if (!leftCombineOps.empty()) {
       rewriter.replaceOp(
           leftCombineOps.back(),
-          cast<stencil::CombineOp>(leftCombineOps.back()).lower());
-      leftOperands = combineOp.lower();
+          cast<stencil::CombineOp>(leftCombineOps.back()).getLower());
+      leftOperands = combineOp.getLower();
     }
     if (!rightCombineOps.empty()) {
       rewriter.replaceOp(
           rightCombineOps.back(),
-          cast<stencil::CombineOp>(rightCombineOps.back()).upper());
-      rightOperands = combineOp.upper();
+          cast<stencil::CombineOp>(rightCombineOps.back()).getUpper());
+      rightOperands = combineOp.getUpper();
     }
 
     // Replace the combine op by the results computed by the fused apply
@@ -289,7 +292,7 @@ struct FuseRewrite : public stencil::CombineOpPattern {
       auto newCombineOp = rewriter.create<stencil::CombineOp>(
           combineOp.getLoc(), combineOp.getResultTypes(), unrollDim,
           currShape.getLB()[unrollDim], leftOperands, newResults, ValueRange(),
-          ValueRange(), combineOp.lbAttr(), combineOp.ubAttr());
+          ValueRange(), combineOp.getLbAttr(), combineOp.getUbAttr());
       newResults = newCombineOp.getResults();
 
       // Get the lower and upper bounds of the children
@@ -303,7 +306,7 @@ struct FuseRewrite : public stencil::CombineOpPattern {
       auto newCombineOp = rewriter.create<stencil::CombineOp>(
           combineOp.getLoc(), combineOp.getResultTypes(), unrollDim,
           currShape.getUB()[unrollDim], newResults, rightOperands, ValueRange(),
-          ValueRange(), combineOp.lbAttr(), combineOp.ubAttr());
+          ValueRange(), combineOp.getLbAttr(), combineOp.getUbAttr());
       newResults = newCombineOp.getResults();
 
       // Get the lower and upper bounds of the children
@@ -322,11 +325,11 @@ struct FuseRewrite : public stencil::CombineOpPattern {
 
 struct PeelOddIterationsPass
     : public PeelOddIterationsPassBase<PeelOddIterationsPass> {
-  void runOnFunction() override;
+  void runOnOperation() override;
 };
 
-void PeelOddIterationsPass::runOnFunction() {
-  FuncOp funcOp = getFunction();
+void PeelOddIterationsPass::runOnOperation() {
+  func::FuncOp funcOp = getOperation();
 
   // Only run on functions marked as stencil programs
   if (!StencilDialect::isStencilProgram(funcOp))
@@ -334,7 +337,7 @@ void PeelOddIterationsPass::runOnFunction() {
 
   // Check the combine to ifelse preparations have been run
   auto result = funcOp.walk([&](stencil::CombineOp combineOp) {
-    if (!combineOp.lowerext().empty() || !combineOp.upperext().empty()) {
+    if (!combineOp.getLowerext().empty() || !combineOp.getUpperext().empty()) {
       combineOp.emitOpError("expected no lower or upper extra operands");
       return WalkResult::interrupt();
     }
@@ -349,8 +352,8 @@ void PeelOddIterationsPass::runOnFunction() {
       }
       return true;
     };
-    if (!(haveUniqueProducer(combineOp.lower()) &&
-          haveUniqueProducer(combineOp.upper()))) {
+    if (!(haveUniqueProducer(combineOp.getLower()) &&
+          haveUniqueProducer(combineOp.getUpper()))) {
       combineOp.emitOpError(
           "expected unique lower and upper producer operations");
       return WalkResult::interrupt();
@@ -373,13 +376,18 @@ void PeelOddIterationsPass::runOnFunction() {
   }
 
   // Populate the pattern list depending on the config
-  OwningRewritePatternList patterns;
+  RewritePatternSet patterns(&getContext());
   patterns.insert<PeelRewrite, FuseRewrite>(&getContext());
+
+  #pragma clang diagnostic push
+  #pragma clang diagnostic ignored "-Wunused-value"
   applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+  #pragma clang diagnostic pop
+
 }
 
 } // namespace
 
-std::unique_ptr<OperationPass<FuncOp>> mlir::createPeelOddIterationsPass() {
+std::unique_ptr<OperationPass<func::FuncOp>> mlir::stencil::createPeelOddIterationsPass() {
   return std::make_unique<PeelOddIterationsPass>();
 }

@@ -23,32 +23,27 @@
 #include "Conversion/StencilToStandard/Passes.h"
 #include "Dialect/Stencil/Passes.h"
 #include "Dialect/Stencil/StencilDialect.h"
-#include "mlir/Dialect/GPU/GPUDialect.h"
-#include "mlir/Dialect/SCF/SCF.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/GPU/Transforms/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+
 #include "mlir/IR/AsmState.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
-#include "mlir/Support/MlirOptMain.h"
+#include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
 using namespace mlir;
 
-// Register the parallel loop gpu mapping pass
-namespace mlir {
-namespace test {
-void registerTestGpuParallelLoopMappingPass();
-}
-} // namespace mlir
-
 int main(int argc, char **argv) {
   registerAllPasses();
-  test::registerTestGpuParallelLoopMappingPass();
+  registerGpuMapParallelLoopsPass();
 
   // Register the stencil passes
-  registerStencilPasses();
-  registerStencilConversionPasses();
+  stencil::registerStencilPasses();
+  stencil::registerStencilConversionPasses();
 
   // Register the stencil pipelines
 #ifdef CUDA_BACKEND_ENABLED
@@ -60,7 +55,7 @@ int main(int argc, char **argv) {
 
   mlir::DialectRegistry registry;
   registry.insert<stencil::StencilDialect>();
-  registry.insert<StandardOpsDialect>();
+  registry.insert<func::FuncDialect>();
   registry.insert<scf::SCFDialect>();
   registry.insert<gpu::GPUDialect>();
   registerAllDialects(registry);

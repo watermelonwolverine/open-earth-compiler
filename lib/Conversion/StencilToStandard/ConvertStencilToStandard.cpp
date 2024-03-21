@@ -6,11 +6,14 @@
 #include "Dialect/Stencil/StencilUtils.h"
 #include "PassDetail.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/GPU/GPUDialect.h"
-#include "mlir/Dialect/SCF/SCF.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+
 #include "mlir/IR/AffineMap.h"
-#include "mlir/IR/BlockAndValueMapping.h"
+
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -24,9 +27,9 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/None.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/iterator_range.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
@@ -44,27 +47,27 @@ namespace {
 // Rewriting Pattern
 //===----------------------------------------------------------------------===//
 
-class FuncOpLowering : public StencilOpToStdPattern<FuncOp> {
+class FuncOpLowering : public StencilOpToStdPattern<func::FuncOp> {
 public:
-  using StencilOpToStdPattern<FuncOp>::StencilOpToStdPattern;
+  using StencilOpToStdPattern<func::FuncOp>::StencilOpToStdPattern;
 
   LogicalResult
   matchAndRewrite(Operation *operation, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = operation->getLoc();
-    auto funcOp = cast<FuncOp>(operation);
+    auto funcOp = cast<func::FuncOp>(operation);
 
     // Convert the original function arguments
     TypeConverter::SignatureConversion result(funcOp.getNumArguments());
-    for (auto &en : llvm::enumerate(funcOp.getType().getInputs()))
+    for (auto en : llvm::enumerate(funcOp.getFunctionType().getInputs()))
       result.addInputs(en.index(), typeConverter.convertType(en.value()));
     auto funcType =
         FunctionType::get(funcOp.getContext(), result.getConvertedTypes(),
-                          funcOp.getType().getResults());
+                          funcOp.getFunctionType().getResults());
 
     // Replace the function by a function with an updated signature
     auto newFuncOp =
-        rewriter.create<FuncOp>(loc, funcOp.getName(), funcType, llvm::None);
+        rewriter.create<func::FuncOp>(loc, funcOp.getName(), funcType);
     rewriter.inlineRegionBefore(funcOp.getBody(), newFuncOp.getBody(),
                                 newFuncOp.end());
 
@@ -115,10 +118,10 @@ public:
 
     // Create a new if op and move the bodies
     auto newOp = rewriter.create<scf::IfOp>(ifOp.getLoc(), newTypes,
-                                            ifOp.condition(), true);
+                                            ifOp.getCondition(), true);
     newOp.walk([&](scf::YieldOp yieldOp) { rewriter.eraseOp(yieldOp); });
-    rewriter.mergeBlocks(ifOp.getBody(0), newOp.getBody(0), llvm::None);
-    rewriter.mergeBlocks(ifOp.getBody(1), newOp.getBody(1), llvm::None);
+    rewriter.mergeBlocks(ifOp.getBody(0), newOp.getBody(0), {});
+    rewriter.mergeBlocks(ifOp.getBody(1), newOp.getBody(1), {});
 
     // Erase the if op if there are no results to replace
     if (newOp.getNumResults() == 0) {
@@ -149,10 +152,10 @@ public:
     auto castOp = cast<stencil::CastOp>(operation);
 
     // Compute the static shape of the field and cast the input memref
-    auto resType = castOp.res().getType().cast<FieldType>();
-    rewriter.replaceOpWithNewOp<MemRefCastOp>(
-        operation, operands[0],
-        typeConverter.convertType(resType).cast<MemRefType>());
+    auto resType = castOp.getRes().getType().cast<FieldType>();
+    rewriter.replaceOpWithNewOp<memref::CastOp>(
+        operation, typeConverter.convertType(resType).cast<MemRefType>(), 
+        operands[0]);
     return success();
   }
 };
@@ -162,20 +165,23 @@ public:
   using StencilOpToStdPattern<stencil::LoadOp>::StencilOpToStdPattern;
 
   LogicalResult
-  matchAndRewrite(Operation *operation, ArrayRef<Value> operands,
+  matchAndRewrite(Operation *operation0, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
+
+    auto operation = llvm::cast<stencil::LoadOp>(operation0);
+
     auto loc = operation->getLoc();
     auto loadOp = cast<stencil::LoadOp>(operation);
 
     // Get the temp and field types
-    auto fieldType = loadOp.field().getType().cast<FieldType>();
+    auto fieldType = loadOp.getField().getType().cast<FieldType>();
 
     // Compute the shape of the subview
     auto subViewShape =
-        computeSubViewShape(fieldType, operation, valueToLB[loadOp.field()]);
+        computeSubViewShape(fieldType, operation, valueToLB[loadOp.getField()]);
 
     // Replace the load op by a subview op
-    auto subViewOp = rewriter.create<SubViewOp>(
+    auto subViewOp = rewriter.create<memref::SubViewOp>(
         loc, operands[0], std::get<0>(subViewShape), std::get<1>(subViewShape),
         std::get<2>(subViewShape));
     rewriter.replaceOp(operation, subViewOp.getResult());
@@ -203,9 +209,9 @@ public:
     }
     rewriter.setInsertionPointAfter(lastUser);
     rewriter.create<gpu::DeallocOp>(loc, TypeRange(),
-                                    ValueRange(bufferOp.temp()));
+                                    ValueRange(bufferOp.getTemp()));
 
-    rewriter.replaceOp(operation, bufferOp.temp());
+    rewriter.replaceOp(operation, bufferOp.getTemp());
     return success();
   }
 };
@@ -217,11 +223,11 @@ public:
   // Get the temporary and the shape of the buffer
   std::tuple<Value, ShapeOp> getShapeAndTemporary(Value value) const {
     if (auto storeOp = getUserOp<stencil::StoreOp>(value)) {
-      return std::make_tuple(storeOp.temp(),
+      return std::make_tuple(storeOp.getTemp(),
                              cast<ShapeOp>(storeOp.getOperation()));
     }
     if (auto bufferOp = getUserOp<stencil::BufferOp>(value)) {
-      return std::make_tuple(bufferOp.temp(),
+      return std::make_tuple(bufferOp.getTemp(),
                              cast<ShapeOp>(bufferOp.getOperation()));
     }
     llvm_unreachable("expected a valid storage operation");
@@ -262,19 +268,20 @@ public:
     for (int64_t i = 0, e = shapeOp.getRank(); i != e; ++i) {
       int64_t lb = shapeOp.getLB()[i];
       int64_t ub = shapeOp.getUB()[i];
-      int64_t step = returnOp.unroll().hasValue() ? returnOp.getUnroll()[i] : 1;
-      lbs.push_back(rewriter.create<ConstantIndexOp>(loc, lb));
-      ubs.push_back(rewriter.create<ConstantIndexOp>(loc, ub));
-      steps.push_back(rewriter.create<ConstantIndexOp>(loc, step));
+      int64_t step =
+          returnOp.getUnroll().has_value() ? returnOp.getMyUnroll()[i] : 1;
+      lbs.push_back(rewriter.create<mlir::arith::ConstantIndexOp>(loc, lb));
+      ubs.push_back(rewriter.create<mlir::arith::ConstantIndexOp>(loc, ub));
+      steps.push_back(rewriter.create<mlir::arith::ConstantIndexOp>(loc, step));
     }
 
     // Convert the signature of the apply op body
     // (access the apply op operands and introduce the loop indicies)
     TypeConverter::SignatureConversion result(applyOp.getNumOperands());
-    for (auto &en : llvm::enumerate(applyOp.getOperands())) {
+    for (auto en : llvm::enumerate(applyOp.getOperands())) {
       result.remapInput(en.index(), operands[en.index()]);
     }
-    rewriter.applySignatureConversion(&applyOp.region(), result);
+    rewriter.applySignatureConversion(&applyOp.getRegion(), result);
 
     // Affine map used for induction variable computation
     // TODO this is only useful for sequential loops
@@ -283,14 +290,14 @@ public:
 
     // Replace the stencil apply operation by a loop nest
     auto parallelOp = rewriter.create<ParallelOp>(loc, lbs, ubs, steps);
-    rewriter.mergeBlockBefore(
+    rewriter.inlineBlockBefore(
         applyOp.getBody(),
-        parallelOp.getLoopBody().getBlocks().back().getTerminator());
+        parallelOp.getRegion().getBlocks().back().getTerminator());
 
     // Insert index variables at the beginning of the loop body
     rewriter.setInsertionPointToStart(parallelOp.getBody());
     for (int64_t i = 0, e = shapeOp.getRank(); i != e; ++i) {
-      rewriter.create<AffineApplyOp>(
+      rewriter.create<mlir::affine::AffineApplyOp>(
           loc, fwdMap, ValueRange(parallelOp.getInductionVars()[i]));
     }
 
@@ -312,7 +319,7 @@ public:
     auto resultOp = cast<stencil::StoreResultOp>(operation);
 
     // Iterate over all return op operands of the result
-    for (auto opOperand : valueToReturnOpOperands[resultOp.res()]) {
+    for (auto opOperand : valueToReturnOpOperands[resultOp.getRes()]) {
       // Get the return op and the parallel op
       auto returnOp = cast<stencil::ReturnOp>(opOperand->getOwner());
       auto parallelOp = returnOp->getParentOfType<ParallelOp>();
@@ -322,7 +329,7 @@ public:
         return failure();
 
       // Store the result in case there is something to store
-      if (resultOp.operands().size() == 1) {
+      if (resultOp.getOperands().size() == 1) {
         // Compute unroll factor and dimension
         auto unrollFac = returnOp.getUnrollFac();
         size_t unrollDim = returnOp.getUnrollDim();
@@ -344,7 +351,7 @@ public:
         lb[unrollDim] += opOperand->getOperandNumber() % unrollFac;
 
         // Set the insertion point to the defining op if possible
-        auto result = resultOp.operands().front();
+        auto result = resultOp.getOperands().front();
         if (result.getDefiningOp() &&
             result.getDefiningOp()->getParentOp() == resultOp->getParentOp())
           rewriter.setInsertionPointAfter(result.getDefiningOp());
@@ -354,8 +361,8 @@ public:
         SmallVector<bool, 3> allocation(lb.size(), true);
         auto storeOffset =
             computeIndexValues(inductionVars, lb, allocation, rewriter);
-        rewriter.create<mlir::StoreOp>(loc, result, allocOp.getResult(0),
-                                       storeOffset);
+        rewriter.create<memref::StoreOp>(loc, result, allocOp.getResult(0),
+                                         storeOffset);
       }
     }
 
@@ -395,15 +402,15 @@ public:
 
     // Add the lower bound of the temporary to the access offset
     auto totalOffset =
-        applyFunElementWise(offsetOp.getOffset(), valueToLB[accessOp.temp()],
+        applyFunElementWise(offsetOp.getOffset(), valueToLB[accessOp.getTemp()],
                             std::minus<int64_t>());
-    auto tempType = accessOp.temp().getType().cast<TempType>();
+    auto tempType = accessOp.getTemp().getType().cast<TempType>();
     auto loadOffset = computeIndexValues(inductionVars, totalOffset,
                                          tempType.getAllocation(), rewriter);
 
     // Replace the access op by a load op
-    rewriter.replaceOpWithNewOp<mlir::LoadOp>(operation, operands[0],
-                                              loadOffset);
+    rewriter.replaceOpWithNewOp<memref::LoadOp>(operation, operands[0],
+                                                loadOffset);
     return success();
   }
 };
@@ -421,19 +428,19 @@ public:
     auto inductionVars = getInductionVars(operation);
     if (inductionVars.size() == 0)
       return failure();
-    assert(inductionVars.size() == dynAccessOp.offset().size() &&
+    assert(inductionVars.size() == dynAccessOp.getOffset().size() &&
            "expected loop nest and access offset to have the same size");
 
     // Add the negative lower bound to the offset
-    auto tempType = dynAccessOp.temp().getType().cast<TempType>();
-    auto tempLB = valueToLB[dynAccessOp.temp()];
+    auto tempType = dynAccessOp.getTemp().getType().cast<TempType>();
+    auto tempLB = valueToLB[dynAccessOp.getTemp()];
     llvm::transform(tempLB, tempLB.begin(), std::negate<int64_t>());
-    auto loadOffset = computeIndexValues(dynAccessOp.offset(), tempLB,
+    auto loadOffset = computeIndexValues(dynAccessOp.getOffset(), tempLB,
                                          tempType.getAllocation(), rewriter);
 
     // Replace the access op by a load op
-    rewriter.replaceOpWithNewOp<mlir::LoadOp>(operation, operands[0],
-                                              loadOffset);
+    rewriter.replaceOpWithNewOp<memref::LoadOp>(operation, operands[0],
+                                                loadOffset);
     return success();
   }
 };
@@ -460,13 +467,15 @@ public:
     auto expr = rewriter.getAffineDimExpr(0) + rewriter.getAffineDimExpr(1);
     auto map = AffineMap::get(2, 0, expr);
     SmallVector<Value, 2> params = {
-        inductionVars[indexOp.dim()],
+        inductionVars[indexOp.getDim()],
         rewriter
-            .create<ConstantIndexOp>(loc, offsetOp.getOffset()[indexOp.dim()])
+            .create<mlir::arith::ConstantIndexOp>(
+                loc, offsetOp.getOffset()[indexOp.getDim()])
             .getResult()};
 
     // replace the index ob by an affine apply op
-    rewriter.replaceOpWithNewOp<mlir::AffineApplyOp>(operation, map, params);
+    rewriter.replaceOpWithNewOp<mlir::affine::AffineApplyOp>(operation, map,
+                                                             params);
 
     return success();
   }
@@ -477,22 +486,24 @@ public:
   using StencilOpToStdPattern<stencil::StoreOp>::StencilOpToStdPattern;
 
   LogicalResult
-  matchAndRewrite(Operation *operation, ArrayRef<Value> operands,
+  matchAndRewrite(Operation *operation0, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
+
+    auto operation = llvm::cast<stencil::StoreOp>(operation0);
     auto loc = operation->getLoc();
     auto storeOp = cast<stencil::StoreOp>(operation);
 
     // Get the temp and field types
-    auto fieldType = storeOp.field().getType().cast<FieldType>();
+    auto fieldType = storeOp.getField().getType().cast<FieldType>();
 
     // Compute the shape of the subview
-    auto subViewShape =
-        computeSubViewShape(fieldType, operation, valueToLB[storeOp.field()]);
+    auto subViewShape = computeSubViewShape(fieldType, operation,
+                                            valueToLB[storeOp.getField()]);
 
     // Replace the allocation by a subview
     auto allocOp = operands[0].getDefiningOp();
     rewriter.setInsertionPoint(allocOp);
-    auto subViewOp = rewriter.create<SubViewOp>(
+    auto subViewOp = rewriter.create<memref::SubViewOp>(
         loc, operands[1], std::get<0>(subViewShape), std::get<1>(subViewShape),
         std::get<2>(subViewShape));
     rewriter.replaceOp(allocOp, subViewOp.getResult());
@@ -502,39 +513,12 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
-// Conversion Target
-//===----------------------------------------------------------------------===//
-
-class StencilToStdTarget : public ConversionTarget {
-public:
-  explicit StencilToStdTarget(MLIRContext &context)
-      : ConversionTarget(context) {}
-
-  bool isDynamicallyLegal(Operation *op) const override {
-    if (auto funcOp = dyn_cast<FuncOp>(op)) {
-      return !StencilDialect::isStencilProgram(funcOp);
-    }
-    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
-      return llvm::none_of(ifOp.getResultTypes(),
-                           [](Type type) { return type.isa<ResultType>(); });
-    }
-    if (auto yieldOp = dyn_cast<scf::YieldOp>(op)) {
-      return llvm::none_of(yieldOp.getOperandTypes(),
-                           [](Type type) { return type.isa<ResultType>(); });
-    }
-    return true;
-  }
-};
-
-//===----------------------------------------------------------------------===//
 // Rewriting Pass
 //===----------------------------------------------------------------------===//
 
 struct StencilToStandardPass
     : public StencilToStandardPassBase<StencilToStandardPass> {
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<AffineDialect>();
-  }
+
   void runOnOperation() override;
 
 private:
@@ -559,7 +543,7 @@ Index StencilToStandardPass::findLB(Value value) {
 }
 
 void StencilToStandardPass::runOnOperation() {
-  OwningRewritePatternList patterns;
+  RewritePatternSet patterns(&getContext());
   auto module = getOperation();
 
   // Check all shapes are set
@@ -577,7 +561,7 @@ void StencilToStandardPass::runOnOperation() {
   // Store the input bounds of the stencil program
   DenseMap<Value, Index> valueToLB;
   module.walk([&](stencil::CastOp castOp) {
-    valueToLB[castOp.res()] = cast<ShapeOp>(castOp.getOperation()).getLB();
+    valueToLB[castOp.getRes()] = cast<ShapeOp>(castOp.getOperation()).getLB();
   });
   module.walk([&](stencil::ApplyOp applyOp) {
     auto shapeOp = cast<ShapeOp>(applyOp.getOperation());
@@ -626,8 +610,8 @@ void StencilToStandardPass::runOnOperation() {
       resultOp.emitOpError("expected valid return op operands");
       return WalkResult::interrupt();
     }
-    valueToReturnOpOperands[resultOp.res()] =
-        resultOp.getReturnOpOperands().getValue();
+    valueToReturnOpOperands[resultOp.getRes()] =
+        resultOp.getReturnOpOperands().value();
     return WalkResult::advance();
   });
   if (storeMappingResult.wasInterrupted())
@@ -637,14 +621,33 @@ void StencilToStandardPass::runOnOperation() {
   populateStencilToStdConversionPatterns(typeConverter, valueToLB,
                                          valueToReturnOpOperands, patterns);
 
-  StencilToStdTarget target(*(module.getContext()));
-  target.addLegalDialect<AffineDialect>();
-  target.addLegalDialect<StandardOpsDialect>();
-  target.addLegalDialect<SCFDialect>();
-  target.addDynamicallyLegalOp<FuncOp>();
-  target.addDynamicallyLegalOp<scf::IfOp>();
-  target.addDynamicallyLegalOp<scf::YieldOp>();
-  target.addLegalOp<ModuleOp, ModuleTerminatorOp>();
+
+  ConversionTarget target(*(module.getContext()));
+  target.addLegalDialect<mlir::affine::AffineDialect>();
+  target.addLegalDialect<func::FuncDialect>();
+  target.addLegalDialect<arith::ArithDialect>();
+  target.addLegalDialect<memref::MemRefDialect>();
+  target.addLegalDialect<scf::SCFDialect>();
+
+  auto callback = [](Operation *op) {
+    if (auto funcOp = dyn_cast<func::FuncOp>(op)) {
+      return !StencilDialect::isStencilProgram(funcOp);
+    }
+    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+      return llvm::none_of(ifOp.getResultTypes(),
+                           [](Type type) { return type.isa<ResultType>(); });
+    }
+    if (auto yieldOp = dyn_cast<scf::YieldOp>(op)) {
+      return llvm::none_of(yieldOp.getOperandTypes(),
+                           [](Type type) { return type.isa<ResultType>(); });
+    }
+    return true;
+  };
+
+  target.addDynamicallyLegalOp<func::FuncOp>(callback);
+  target.addDynamicallyLegalOp<scf::IfOp>(callback);
+  target.addDynamicallyLegalOp<scf::YieldOp>(callback);
+  target.addLegalOp<ModuleOp>();
   target.addLegalOp<gpu::AllocOp>();
   target.addLegalOp<gpu::DeallocOp>();
   if (failed(applyFullConversion(module, target, std::move(patterns)))) {
@@ -661,7 +664,7 @@ namespace stencil {
 void populateStencilToStdConversionPatterns(
     StencilTypeConverter &typeConveter, DenseMap<Value, Index> &valueToLB,
     DenseMap<Value, SmallVector<OpOperand *, 10>> &valueToReturnOpOperands,
-    mlir::OwningRewritePatternList &patterns) {
+    RewritePatternSet &patterns) {
   patterns.insert<FuncOpLowering, IfOpLowering, YieldOpLowering, CastOpLowering,
                   LoadOpLowering, ApplyOpLowering, BufferOpLowering,
                   ReturnOpLowering, StoreResultOpLowering, AccessOpLowering,
@@ -679,9 +682,9 @@ StencilTypeConverter::StencilTypeConverter(MLIRContext *context_)
   addConversion([&](GridType type) {
     return MemRefType::get(type.getMemRefShape(), type.getElementType());
   });
-  addConversion([&](Type type) -> Optional<Type> {
+  addConversion([&](Type type) -> std::optional<Type> {
     if (auto gridType = type.dyn_cast<GridType>())
-      return llvm::None;
+      return {};
     return type;
   });
 }
@@ -716,7 +719,7 @@ StencilToStdPattern::getInductionVars(Operation *operation) const {
     return inductionVariables;
 
   // Collect the induction variables
-  parallelOp.walk([&](AffineApplyOp applyOp) {
+  parallelOp.walk([&](affine::AffineApplyOp applyOp) {
     for (auto operand : applyOp.getOperands()) {
       // TODO only useful for sequential applies
       if (forOp && forOp.getInductionVar() == operand) {
@@ -761,9 +764,10 @@ SmallVector<Value, 3> StencilToStdPattern::computeIndexValues(
     if (en.value()) {
       SmallVector<Value, 2> params = {
           inductionVars[en.index()],
-          rewriter.create<ConstantIndexOp>(loc, offset[en.index()])
+          rewriter.create<arith::ConstantIndexOp>(loc, offset[en.index()])
               .getResult()};
-      auto affineApplyOp = rewriter.create<AffineApplyOp>(loc, map, params);
+      auto affineApplyOp =
+          rewriter.create<mlir::affine::AffineApplyOp>(loc, map, params);
       resOffset.insert(resOffset.begin(), affineApplyOp.getResult());
     }
   }
@@ -773,6 +777,6 @@ SmallVector<Value, 3> StencilToStdPattern::computeIndexValues(
 } // namespace stencil
 } // namespace mlir
 
-std::unique_ptr<Pass> mlir::createConvertStencilToStandardPass() {
+std::unique_ptr<Pass> mlir::stencil::createConvertStencilToStandardPass() {
   return std::make_unique<StencilToStandardPass>();
 }

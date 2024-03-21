@@ -9,10 +9,10 @@ module {
     %2 = stencil.load %0 : (!stencil.field<72x72x72xf64>) -> !stencil.temp<?x?x?xf64>
     %3 = stencil.apply (%arg2 = %2 : !stencil.temp<?x?x?xf64>, %arg3 = %adeltat : f64) -> !stencil.temp<?x?x?xf64> {
 
-      %one_index = constant 1 : index
-      %one_int = constant 1 : i64
-      %one_float = constant 1.0 : f64
-      %zero_float = constant 0.0 : f64
+      %one_index = arith.constant 1 : index
+      %one_int = arith.constant 1 : i64
+      %one_float = arith.constant 1.0 : f64
+      %zero_float = arith.constant 0.0 : f64
 
       %i_idx = stencil.index 0 [0, 0, 0] : index
       %j_idx = stencil.index 1 [0, 0, 0] : index
@@ -30,9 +30,9 @@ module {
       %9 = addi %shifted_i_idx, %one_index : index
       %10 = stencil.dyn_access %arg2(%9, %j_idx, %k_idx) in [-4, -4, -4] : [4, 4, 4] : (!stencil.temp<?x?x?xf64>) -> f64
       %onemsigma = subf %one_float, %sigma : f64
-      %12 = mulf %onemsigma, %8 : f64
-      %13 = mulf %sigma, %10 : f64
-      %14 = addf %12, %13 : f64
+      %12 = arith.mulf %onemsigma, %8 : f64
+      %13 = arith.mulf %sigma, %10 : f64
+      %14 = arith.addf %12, %13 : f64
       %15 = stencil.store_result %14 : (f64) -> !stencil.result<f64>
       stencil.return %15 : !stencil.result<f64>
     }

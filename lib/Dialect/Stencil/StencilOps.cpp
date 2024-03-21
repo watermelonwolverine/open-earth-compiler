@@ -2,10 +2,9 @@
 #include "Dialect/Stencil/StencilDialect.h"
 #include "Dialect/Stencil/StencilTypes.h"
 #include "Dialect/Stencil/StencilUtils.h"
-#include "mlir/Dialect/SCF/SCF.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Block.h"
-#include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/OperationSupport.h"
@@ -18,7 +17,6 @@
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/None.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
@@ -32,22 +30,249 @@ using namespace stencil;
 // stencil.apply
 //===----------------------------------------------------------------------===//
 
-static ParseResult parseApplyOp(OpAsmParser &parser, OperationState &state) {
-  SmallVector<OpAsmParser::OperandType, 8> operands;
-  SmallVector<OpAsmParser::OperandType, 8> arguments;
+LogicalResult CastOp::verify() {
+  auto fieldType = getField().getType().cast<stencil::GridType>();
+  auto resType = getRes().getType().cast<stencil::GridType>();
+  auto shapeOp = cast<ShapeOp>(this->getOperation());
+  if (!fieldType.hasDynamicShape())
+    return emitOpError("expected field to have dynamic shape");
+  if (resType.hasDynamicShape())
+    return emitOpError("expected result to have static shape");
+  if (fieldType.getAllocation() != resType.getAllocation())
+    return emitOpError(
+        "expected the field and result types to have the same allocation");
+  if (fieldType.getElementType() != resType.getElementType())
+    return emitOpError(
+        "the field and result types have different element types");
+  if (shapeOp.getRank() != fieldType.getRank() ||
+      shapeOp.getRank() != resType.getRank())
+    return emitOpError(
+        "expected op and the field and result types to have the same rank");
+
+  // Ensure the shape matches the result type
+  if (!resType.hasEqualShape(shapeOp.getLB(), shapeOp.getUB()))
+    return emitOpError("expected op and result type to have the same shape");
+
+  // Verify all users fit the shape
+  for (auto user : getRes().getUsers()) {
+    if (auto userOp = dyn_cast<ShapeOp>(user)) {
+      if (userOp.hasShape() &&
+          (shapeOp.getLB() !=
+               applyFunElementWise(shapeOp.getLB(), userOp.getLB(), min) ||
+           shapeOp.getUB() !=
+               applyFunElementWise(shapeOp.getUB(), userOp.getUB(), max)))
+        return emitOpError("shape not large enough to fit all accesses");
+    }
+  }
+
+  return success();
+}
+
+LogicalResult IndexOp::verify() { return success(); }
+
+LogicalResult AccessOp::verify() {
+  auto tempType = getTemp().getType().cast<stencil::GridType>();
+  if (getOffset().size() != tempType.getRank())
+    return emitOpError("offset and temp dimensions do not match");
+  if (getRes().getType() != tempType.getElementType())
+    return emitOpError("result type and element type are inconsistent");
+  return success();
+}
+
+LogicalResult DynAccessOp::verify() {
+  auto tempType = getTemp().getType().cast<stencil::GridType>();
+  if (getOffset().size() != tempType.getRank())
+    return emitOpError("offset and temp dimensions do not match");
+  if (getRes().getType() != tempType.getElementType())
+    return emitOpError("result type and element type are inconsistent");
+  return success();
+}
+
+LogicalResult LoadOp::verify() {
+  // Check the field and result types
+  auto fieldType = getField().getType().cast<stencil::GridType>();
+  auto resType = getRes().getType().cast<stencil::GridType>();
+  if (fieldType.hasDynamicShape())
+    return emitOpError("expected fields to have static shape");
+  if (fieldType.getRank() != resType.getRank())
+    return emitOpError("the field and temp types have different rank");
+  if (fieldType.getAllocation() != resType.getAllocation())
+    return emitOpError("the field and temp types have different allocation");
+  if (fieldType.getElementType() != resType.getElementType())
+    return emitOpError("the field and temp types have different element types");
+
+  // Ensure the shape matches the field and result types
+  auto shapeOp = cast<ShapeOp>(this->getOperation());
+  if (shapeOp.hasShape()) {
+    if (!fieldType.hasLargerOrEqualShape(shapeOp.getLB(), shapeOp.getUB()))
+      return emitOpError(
+          "expected the field type to be larger than the op shape");
+    if (!resType.hasEqualShape(shapeOp.getLB(), shapeOp.getUB()))
+      return emitOpError("expected op and result type to have the same shape");
+  }
+
+  if (!isa<stencil::CastOp>(getField().getDefiningOp()))
+    return emitOpError(
+        "expected the defining op of the field is a cast operation");
+
+  return success();
+}
+
+LogicalResult BufferOp::verify() {
+  // Check the temp and result types
+  auto tempType = getTemp().getType().cast<stencil::GridType>();
+  auto resType = getRes().getType().cast<stencil::GridType>();
+  if (resType.getRank() != tempType.getRank())
+    return emitOpError("the result and temp types have different rank");
+  if (resType.getAllocation() != tempType.getAllocation())
+    return emitOpError("the result and temp types have different allocation");
+  if (resType.getElementType() != tempType.getElementType())
+    return emitOpError(
+        "the result and temp types have different element types");
+
+  // Ensure the shape matches the temp and result types
+  auto shapeOp = cast<ShapeOp>(this->getOperation());
+  if (shapeOp.hasShape()) {
+    if (!tempType.hasLargerOrEqualShape(shapeOp.getLB(), shapeOp.getUB()))
+      return emitOpError(
+          "expected the temp type to be larger than the op shape");
+    if (!resType.hasEqualShape(shapeOp.getLB(), shapeOp.getUB()))
+      return emitOpError("expected op and result type to have the same shape");
+  }
+
+  if (!(isa<stencil::ApplyOp>(getTemp().getDefiningOp()) ||
+        isa<stencil::CombineOp>(getTemp().getDefiningOp())))
+    return emitOpError("expected buffer to connect to an apply or combine op");
+
+  if (!llvm::all_of(getTemp().getUsers(),
+                    [](Operation *op) { return isa<stencil::BufferOp>(op); }))
+    return emitOpError("expected only buffers use the same value");
+  return success();
+}
+
+LogicalResult StoreOp::verify() {
+  // Check the field and result types
+  auto fieldType = getField().getType().cast<stencil::GridType>();
+  auto tempType = getTemp().getType().cast<stencil::GridType>();
+  if (fieldType.hasDynamicShape())
+    return emitOpError("expected fields to have static shape");
+  if (fieldType.getRank() != tempType.getRank())
+    return emitOpError("the field and temp types have different rank");
+  if (fieldType.getRank() != tempType.getRank())
+    return emitOpError("the field and temp types have different rank");
+  if (fieldType.getAllocation() != tempType.getAllocation())
+    return emitOpError("the field and temp types have different allocation");
+  if (fieldType.getElementType() != tempType.getElementType())
+    return emitOpError("the field and temp types have different element types");
+
+  // Ensure the shape matches the temp and result types
+  auto shapeOp = cast<ShapeOp>(this->getOperation());
+  if (!fieldType.hasLargerOrEqualShape(shapeOp.getLB(), shapeOp.getUB()))
+    return emitOpError(
+        "expected the field type to be larger than the op shape");
+  if (!tempType.hasLargerOrEqualShape(shapeOp.getLB(), shapeOp.getUB()))
+    return emitOpError("expected the temp type to be larger than the op shape");
+
+  if (!(dyn_cast<stencil::ApplyOp>(getTemp().getDefiningOp()) ||
+        dyn_cast<stencil::CombineOp>(getTemp().getDefiningOp())))
+    return emitOpError("output temp not result of an apply or a combine op");
+  if (llvm::count_if(getField().getUsers(), [](Operation *op) {
+        return isa_and_nonnull<stencil::LoadOp>(op);
+      }) != 0)
+    return emitOpError("an output cannot be an input");
+  if (llvm::count_if(getField().getUsers(), [](Operation *op) {
+        return isa_and_nonnull<stencil::StoreOp>(op);
+      }) != 1)
+    return emitOpError("multiple stores to the same output");
+
+  if (!isa<stencil::CastOp>(getField().getDefiningOp()))
+    return emitOpError(
+        "expected the defining op of the field is a cast operation");
+
+  return success();
+}
+
+LogicalResult ApplyOp::verify() {
+  // Check the operands
+  if (getRegion().front().getNumArguments() != getOperands().size())
+    return emitOpError("operand and argument counts do not match");
+  for (unsigned i = 0, e = getOperands().size(); i != e; ++i) {
+    if (getRegion().front().getArgument(i).getType() !=
+        getOperands()[i].getType())
+      return emitOpError("operand and argument types do not match");
+  }
+
+  // Check the results
+  auto shapeOp = cast<ShapeOp>(this->getOperation());
+  for (auto result : getRes()) {
+    auto tempType = result.getType().cast<GridType>();
+    if (shapeOp.hasShape()) {
+      if (shapeOp.getRank() != tempType.getRank())
+        return emitOpError("expected result rank to match the operation rank");
+      if (!tempType.hasEqualShape(shapeOp.getLB(), shapeOp.getUB()))
+        return emitOpError("expected temp type to have the shape of the op");
+    }
+  }
+  return success();
+}
+
+LogicalResult StoreResultOp::verify() {
+  // Check at most one operand
+  if (getOperands().size() > 1)
+    return emitOpError("expected at most one operand");
+
+  // Check the return type
+  auto resultType =
+      getRes().getType().cast<stencil::ResultType>().getResultType();
+  if (getOperands().size() == 1 && resultType != getOperands()[0].getType())
+    return emitOpError("operand type and result type are inconsistent");
+
+  // Check the result mapping
+  if (!getReturnOpOperands())
+    return emitOpError("expected valid mapping to return op operands");
+  return success();
+}
+
+LogicalResult ReturnOp::verify() {
+  auto applyOp = cast<stencil::ApplyOp>(getOperation()->getParentOp());
+  unsigned unrollFac = getUnrollFac();
+
+  // Verify the number of operands matches the number of apply results
+  auto results = applyOp.getRes();
+  if (getNumOperands() != unrollFac * results.size())
+    return emitOpError("the operand and apply result counts do not match");
+
+  // Verify the element types match
+  for (unsigned i = 0, e = results.size(); i != e; ++i) {
+    auto tempType = applyOp.getResult(i).getType().cast<GridType>();
+    for (unsigned j = 0; j < unrollFac; j++)
+      if (getOperand(i * unrollFac + j)
+              .getType()
+              .cast<stencil::ResultType>()
+              .getResultType() != tempType.getElementType())
+        return emitOpError(
+            "the operand and apply result element types do not match");
+  }
+  return success();
+}
+
+ParseResult ApplyOp::parse(OpAsmParser &parser, OperationState &state) {
+  SmallVector<OpAsmParser::UnresolvedOperand, 8> operands;
+  SmallVector<OpAsmParser::Argument, 8> arguments;
   SmallVector<Type, 8> operandTypes;
 
   // Parse the assignment list
   if (succeeded(parser.parseOptionalLParen())) {
     do {
-      OpAsmParser::OperandType currentArgument, currentOperand;
+      OpAsmParser::Argument currentArgument;
+      OpAsmParser::UnresolvedOperand currentOperand;
       Type currentType;
 
-      if (parser.parseRegionArgument(currentArgument) || parser.parseEqual() ||
-          parser.parseOperand(currentOperand) ||
-          parser.parseColonType(currentType))
+      if (parser.parseArgument(currentArgument, /*allowResultNumber=*/false) || parser.parseEqual() || 
+          parser.parseOperand(currentOperand) || parser.parseColonType(currentType))
         return failure();
 
+      currentArgument.type = currentType;
       arguments.push_back(currentArgument);
       operands.push_back(currentOperand);
       operandTypes.push_back(currentType);
@@ -70,7 +295,7 @@ static ParseResult parseApplyOp(OpAsmParser &parser, OperationState &state) {
 
   // Parse the body region.
   Region *body = state.addRegion();
-  if (parser.parseRegion(*body, arguments, operandTypes))
+  if (parser.parseRegion(*body, arguments))
     return failure();
 
   // Parse the optional bounds
@@ -90,12 +315,12 @@ static ParseResult parseApplyOp(OpAsmParser &parser, OperationState &state) {
   return success();
 }
 
-static void print(stencil::ApplyOp applyOp, OpAsmPrinter &printer) {
+void ApplyOp::print(OpAsmPrinter &printer) {
   printer << stencil::ApplyOp::getOperationName() << ' ';
   // Print the region arguments
-  SmallVector<Value, 10> operands = applyOp.getOperands();
-  if (!applyOp.region().empty() && !operands.empty()) {
-    Block *body = applyOp.getBody();
+  SmallVector<Value, 10> operands = getOperands();
+  if (!getRegion().empty() && !operands.empty()) {
+    Block *body = getBody();
     printer << "(";
     llvm::interleaveComma(
         llvm::seq<int>(0, operands.size()), printer, [&](int i) {
@@ -107,25 +332,25 @@ static void print(stencil::ApplyOp applyOp, OpAsmPrinter &printer) {
 
   // Print the result types
   printer << "-> ";
-  if (applyOp.res().size() > 1)
+  if (getRes().size() > 1)
     printer << "(";
-  llvm::interleaveComma(applyOp.res().getTypes(), printer);
-  if (applyOp.res().size() > 1)
+  llvm::interleaveComma(getRes().getTypes(), printer);
+  if (getRes().size() > 1)
     printer << ")";
 
   // Print optional attributes
   printer.printOptionalAttrDictWithKeyword(
-      applyOp.getAttrs(), /*elidedAttrs=*/{stencil::ApplyOp::getLBAttrName(),
-                                           stencil::ApplyOp::getUBAttrName()});
+      (*this)->getAttrs(), /*elidedAttrs=*/{stencil::ApplyOp::getLBAttrName(),
+                                            stencil::ApplyOp::getUBAttrName()});
 
   // Print region, bounds, and return type
-  printer.printRegion(applyOp.region(),
+  printer.printRegion(getRegion(),
                       /*printEntryBlockArgs=*/false);
-  if (applyOp.lb().hasValue() && applyOp.ub().hasValue()) {
+  if (getLb().has_value() && getUb().has_value()) {
     printer << " to (";
-    printer.printAttribute(applyOp.lb().getValue());
+    printer.printAttribute(getLb().value());
     printer << " : ";
-    printer.printAttribute(applyOp.ub().getValue());
+    printer.printAttribute(getUb().value());
     printer << ")";
   }
 }
@@ -148,7 +373,7 @@ void stencil::ApplyOp::updateArgumentTypes() {
 
 bool stencil::ApplyOp::hasOnlyEmptyStores() {
   auto result = walk([&](stencil::StoreResultOp resultOp) {
-    if (resultOp.operands().size() != 0)
+    if (resultOp.getOperands().size() != 0)
       return WalkResult::interrupt();
     return WalkResult::advance();
   });
@@ -193,14 +418,14 @@ void stencil::DynAccessOp::shiftByOffset(ArrayRef<int64_t> offset) {
   llvm::transform(ub, std::back_inserter(ubAttrs), [&](int64_t x) {
     return IntegerAttr::get(IntegerType::get(getContext(), 64), x);
   });
-  lbAttr(ArrayAttr::get(lbAttrs, getContext()));
-  ubAttr(ArrayAttr::get(ubAttrs, getContext()));
+  setLbAttr(ArrayAttr::get(getContext(), lbAttrs));
+  setUbAttr(ArrayAttr::get(getContext(), ubAttrs));
 }
 
 std::tuple<stencil::Index, stencil::Index>
 stencil::DynAccessOp::getAccessExtent() {
   Index lowerBound, upperBound;
-  for (auto it : llvm::zip(lb(), ub())) {
+  for (auto it : llvm::zip(getLb(), getUb())) {
     lowerBound.push_back(
         std::get<0>(it).cast<IntegerAttr>().getValue().getSExtValue());
     upperBound.push_back(
@@ -213,7 +438,7 @@ stencil::DynAccessOp::getAccessExtent() {
 // stencil.store_result
 //===----------------------------------------------------------------------===//
 
-Optional<SmallVector<OpOperand *, 10>>
+std::optional<SmallVector<OpOperand *, 10>>
 stencil::StoreResultOp::getReturnOpOperands() {
   // Keep a list of consumer operands and operations
   DenseSet<Operation *> currOperations;
@@ -233,7 +458,7 @@ stencil::StoreResultOp::getReturnOpOperands() {
       // Expected for ops in apply ops not to return a result
       if (isa<scf::ForOp>(yieldOp->getParentOp()) &&
           yieldOp->getParentOfType<stencil::ApplyOp>())
-        return llvm::None;
+        return {};
 
       // Search the uses of the result and compute the consumer operations
       currOperations.clear();
@@ -249,10 +474,10 @@ stencil::StoreResultOp::getReturnOpOperands() {
       currOperands.swap(nextOperands);
     } else {
       // Expected a return or a yield operation
-      return llvm::None;
+      return {};
     }
   }
-  return llvm::None;
+  return {};
 }
 
 //===----------------------------------------------------------------------===//
@@ -318,16 +543,19 @@ bool checkTempTypesMatch(Type type1, Type type2, unsigned dim) {
 }
 } // namespace
 
-static LogicalResult verify(stencil::CombineOp op) {
+LogicalResult stencil::CombineOp::verify() {
+
+  auto op = llvm::cast<stencil::CombineOp>(getOperation());
+
   // Check the combine op has at least one operand
   if (op.getNumOperands() == 0)
     return op.emitOpError("expected the operand list to be non-empty");
 
   // Check the operand and result sizes match
-  if (op.lower().size() != op.upper().size())
+  if (op.getLower().size() != op.getUpper().size())
     return op.emitOpError("expected the lower and upper operand size to match");
-  if (op.res().size() !=
-      op.lower().size() + op.lowerext().size() + op.upperext().size())
+  if (op.getRes().size() !=
+      op.getLower().size() + op.getLowerext().size() + op.getUpperext().size())
     return op.emitOpError("expected the result and operand sizes to match");
 
   // Check all inputs have a defining op
@@ -336,44 +564,47 @@ static LogicalResult verify(stencil::CombineOp op) {
     return op.emitOpError("expected the operands to have a defining op");
 
   // Check the lower and upper operand types match
-  if (!llvm::all_of(llvm::zip(op.lower().getTypes(), op.upper().getTypes()),
-                    [&](std::tuple<Type, Type> x) {
-                      return checkTempTypesMatch(std::get<0>(x), std::get<1>(x),
-                                                 op.dim());
-                    }))
+  if (!llvm::all_of(
+          llvm::zip(op.getLower().getTypes(), op.getUpper().getTypes()),
+          [&](std::tuple<Type, Type> x) {
+            return checkTempTypesMatch(std::get<0>(x), std::get<1>(x),
+                                       op.getDim());
+          }))
     return op.emitOpError("expected lower and upper operand types to match");
 
   // Check the lower/upper operand types match the result types
-  if (!llvm::all_of(llvm::zip(op.lower().getTypes(), op.res().getTypes()),
+  if (!llvm::all_of(llvm::zip(op.getLower().getTypes(), op.getRes().getTypes()),
                     [&](std::tuple<Type, Type> x) {
                       return checkTempTypesMatch(std::get<0>(x), std::get<1>(x),
-                                                 op.dim());
+                                                 op.getDim());
                     }))
     return op.emitOpError("expected the lower/upper and result types to match");
 
   // Check the if the extra types match the corresponding result types
-  auto lowerExtResTypes = op.res().getTypes().drop_front(op.lower().size());
-  auto upperExtResTypes = op.res().getTypes().take_back(op.upperext().size());
-  if (!llvm::all_of(llvm::zip(op.lowerext().getTypes(), lowerExtResTypes),
+   auto lowerExtResTypes = op.getRes().drop_front(op.getLower().size()).getTypes();
+   auto upperExtResTypes = op.getRes().take_back(op.getUpperext().size()).getTypes();
+  if (!llvm::all_of(llvm::zip(op.getLowerext().getTypes(), lowerExtResTypes),
                     [&](std::tuple<Type, Type> x) {
                       return checkTempTypesMatch(std::get<0>(x), std::get<1>(x),
-                                                 op.dim());
+                                                 op.getDim());
                     }))
     return op.emitOpError("expected the lowerext and result types to match");
-  if (!llvm::all_of(llvm::zip(op.upperext().getTypes(), upperExtResTypes),
+  if (!llvm::all_of(llvm::zip(op.getUpperext().getTypes(), upperExtResTypes),
                     [&](std::tuple<Type, Type> x) {
                       return checkTempTypesMatch(std::get<0>(x), std::get<1>(x),
-                                                 op.dim());
+                                                 op.getDim());
                     }))
     return op.emitOpError("expected the upperext and result types to match");
 
   // Check the operands either connect to one combine or multiple apply ops
   auto lowerDefiningOps = op.getLowerDefiningOps();
   auto upperDefiningOps = op.getUpperDefiningOps();
-  if (!checkOneByOneOperandMapping(op.lower(), op.lowerext(), lowerDefiningOps))
+  if (!checkOneByOneOperandMapping(op.getLower(), op.getLowerext(),
+                                   lowerDefiningOps))
     return op.emitOpError("expected the lower operands to connect one-by-one "
                           "to one combine or multiple apply ops");
-  if (!checkOneByOneOperandMapping(op.upper(), op.upperext(), upperDefiningOps))
+  if (!checkOneByOneOperandMapping(op.getUpper(), op.getUpperext(),
+                                   upperDefiningOps))
     return op.emitOpError("expected the upper operands to connect one-by-one "
                           "to one combine or multiple apply ops");
   return success();
@@ -408,7 +639,7 @@ stencil::ApplyOpPattern::cleanupOpArguments(stencil::ApplyOp applyOp,
   // Compute the new operand list and index mapping
   llvm::DenseMap<Value, unsigned int> newIndex;
   SmallVector<Value, 10> newOperands;
-  for (auto &en : llvm::enumerate(applyOp.getOperands())) {
+  for (auto en : llvm::enumerate(applyOp.getOperands())) {
     if (newIndex.count(en.value()) == 0) {
       if (!applyOp.getBody()->getArgument(en.index()).getUses().empty()) {
         newIndex[en.value()] = newOperands.size();
@@ -421,7 +652,8 @@ stencil::ApplyOpPattern::cleanupOpArguments(stencil::ApplyOp applyOp,
   if (newOperands.size() < applyOp.getNumOperands()) {
     auto loc = applyOp.getLoc();
     auto newOp = rewriter.create<stencil::ApplyOp>(
-        loc, applyOp.getResultTypes(), newOperands, applyOp.lb(), applyOp.ub());
+        loc, applyOp.getResultTypes(), newOperands, applyOp.getLb(),
+        applyOp.getUb());
 
     // Compute the argument mapping and move the block
     SmallVector<Value, 10> newArgs(applyOp.getNumOperands());
@@ -460,8 +692,8 @@ stencil::ApplyOp stencil::CombineOpPattern::createEmptyApply(
     // Compute the shape of the empty apply
     lb = shapeOp.getLB();
     ub = shapeOp.getUB();
-    lb[combineOp.dim()] = max(lowerLimit, lb[combineOp.dim()]);
-    ub[combineOp.dim()] = min(upperLimit, ub[combineOp.dim()]);
+    lb[combineOp.getDim()] = max(lowerLimit, lb[combineOp.getDim()]);
+    ub[combineOp.getDim()] = min(upperLimit, ub[combineOp.getDim()]);
 
     // Resize the operand types
     for (auto value : values) {
@@ -484,7 +716,7 @@ stencil::ApplyOp stencil::CombineOpPattern::createEmptyApply(
       returnOp.getLoc(), newResultTypes,
       lb.empty() ? nullptr : rewriter.getI64ArrayAttr(lb),
       ub.empty() ? nullptr : rewriter.getI64ArrayAttr(ub));
-  newOp.region().push_back(new Block());
+  newOp.getRegion().push_back(new Block());
 
   // Update the body of the apply op
   OpBuilder::InsertionGuard guard(rewriter);
@@ -498,7 +730,7 @@ stencil::ApplyOp stencil::CombineOpPattern::createEmptyApply(
         loc, ResultType::get(elementType), ValueRange());
     newOperands.append(returnOp.getUnrollFac(), resultOp);
   }
-  rewriter.create<stencil::ReturnOp>(loc, newOperands, returnOp.unroll());
+  rewriter.create<stencil::ReturnOp>(loc, newOperands, returnOp.getUnroll());
   return newOp;
 }
 
@@ -513,7 +745,7 @@ struct ApplyOpLoadCleaner : public stencil::ApplyOpPattern {
                                PatternRewriter &rewriter) const {
     // Check all load ops have a shape (otherwise cse is sufficient)
     if (llvm::any_of(loadOps,
-                     [](ShapeOp shapeOp) { return !shapeOp.hasShape(); }))
+                     [](Operation *op) { return !llvm::cast<ShapeOp>(op).hasShape(); }))
       return failure();
 
     // Compute the bounding box of all load shapes
@@ -527,7 +759,7 @@ struct ApplyOpLoadCleaner : public stencil::ApplyOpPattern {
 
     // Create a new load operation
     auto loadOp = rewriter.create<stencil::LoadOp>(
-        applyOp.getLoc(), cast<stencil::LoadOp>(*loadOps.begin()).field(),
+        applyOp.getLoc(), cast<stencil::LoadOp>(*loadOps.begin()).getField(),
         rewriter.getI64ArrayAttr(lb), rewriter.getI64ArrayAttr(ub));
 
     // Compute the new operand list
@@ -540,8 +772,8 @@ struct ApplyOpLoadCleaner : public stencil::ApplyOpPattern {
 
     // Replace the apply operation using the new load op
     auto newOp = rewriter.create<stencil::ApplyOp>(
-        applyOp.getLoc(), applyOp.getResultTypes(), newOperands, applyOp.lb(),
-        applyOp.ub());
+        applyOp.getLoc(), applyOp.getResultTypes(), newOperands,
+        applyOp.getLb(), applyOp.getUb());
     rewriter.mergeBlocks(applyOp.getBody(), newOp.getBody(),
                          newOp.getBody()->getArguments());
     rewriter.replaceOp(applyOp, newOp.getResults());
@@ -555,7 +787,7 @@ struct ApplyOpLoadCleaner : public stencil::ApplyOpPattern {
     for (auto value : applyOp.getOperands()) {
       if (auto loadOp =
               dyn_cast_or_null<stencil::LoadOp>(value.getDefiningOp())) {
-        fieldToLoadOps[loadOp.field()].insert(loadOp.getOperation());
+        fieldToLoadOps[loadOp.getField()].insert(loadOp.getOperation());
       }
     }
     // Replace multiple loads of the same field
@@ -617,11 +849,11 @@ struct ApplyOpResCleaner : public stencil::ApplyOpPattern {
 
       // Create a new apply operation
       auto newOp = rewriter.create<stencil::ApplyOp>(
-          applyOp.getLoc(), newResultTypes, applyOp.getOperands(), applyOp.lb(),
-          applyOp.ub());
+          applyOp.getLoc(), newResultTypes, applyOp.getOperands(),
+          applyOp.getLb(), applyOp.getUb());
       rewriter.setInsertionPoint(returnOp);
       rewriter.create<stencil::ReturnOp>(returnOp.getLoc(), newOperands,
-                                         returnOp.unroll());
+                                         returnOp.getUnroll());
       rewriter.eraseOp(returnOp);
       rewriter.mergeBlocks(applyOp.getBody(), newOp.getBody(),
                            newOp.getBody()->getArguments());
@@ -649,14 +881,15 @@ struct CombineOpSymmetricCleaner : public stencil::CombineOpPattern {
   LogicalResult matchAndRewrite(stencil::CombineOp combineOp,
                                 PatternRewriter &rewriter) const override {
     // Exit if the combine has extra operands
-    if (combineOp.lowerext().size() > 0 || combineOp.upperext().size() > 0)
+    if (combineOp.getLowerext().size() > 0 ||
+        combineOp.getUpperext().size() > 0)
       return failure();
 
     // Compute the empty values
     SmallVector<Value, 10> emptyValues;
-    for (auto en : llvm::enumerate(combineOp.lower())) {
+    for (auto en : llvm::enumerate(combineOp.getLower())) {
       auto lowerOp = getDefiningApplyOp(en.value());
-      auto upperOp = getDefiningApplyOp(combineOp.upper()[en.index()]);
+      auto upperOp = getDefiningApplyOp(combineOp.getUpper()[en.index()]);
       if (lowerOp && upperOp && lowerOp.hasOnlyEmptyStores() &&
           upperOp.hasOnlyEmptyStores()) {
         emptyValues.push_back(en.value());
@@ -664,8 +897,8 @@ struct CombineOpSymmetricCleaner : public stencil::CombineOpPattern {
     }
 
     // Compare the upper and lower values
-    for (auto en : llvm::enumerate(combineOp.lower())) {
-      if (en.value() != combineOp.upper()[en.index()] &&
+    for (auto en : llvm::enumerate(combineOp.getLower())) {
+      if (en.value() != combineOp.getUpper()[en.index()] &&
           !llvm::is_contained(emptyValues, en.value()))
         return failure();
     }
@@ -681,8 +914,8 @@ struct CombineOpSymmetricCleaner : public stencil::CombineOpPattern {
     // Compute the replacement values
     unsigned emptyCount = 0;
     SmallVector<Value, 10> repResults;
-    for (auto en : llvm::enumerate(combineOp.lower())) {
-      if (en.value() == combineOp.upper()[en.index()]) {
+    for (auto en : llvm::enumerate(combineOp.getLower())) {
+      if (en.value() == combineOp.getUpper()[en.index()]) {
         repResults.push_back(en.value());
       } else {
         repResults.push_back(emptyOp.getResult(emptyCount++));
@@ -705,18 +938,18 @@ struct CombineOpEmptyCleaner : public stencil::CombineOpPattern {
     auto shapeOp = cast<ShapeOp>(combineOp.getOperation());
     if (shapeOp.hasShape()) {
       // Remove the upper operands if the index is larger than the upper bound
-      if (combineOp.getIndex() > shapeOp.getUB()[combineOp.dim()]) {
+      if (combineOp.getMyIndex() > shapeOp.getUB()[combineOp.getDim()]) {
         // Compute the replacement results
-        SmallVector<Value, 10> repResults = combineOp.lower();
-        repResults.append(combineOp.lowerext().begin(),
-                          combineOp.lowerext().end());
+        SmallVector<Value, 10> repResults = combineOp.getLower();
+        repResults.append(combineOp.getLowerext().begin(),
+                          combineOp.getLowerext().end());
 
         // Introduce empty stores in case there are upper extra results
-        if (combineOp.upperext().size() > 0) {
+        if (combineOp.getUpperext().size() > 0) {
           auto newOp =
               createEmptyApply(combineOp, std::numeric_limits<int64_t>::min(),
                                std::numeric_limits<int64_t>::max(),
-                               combineOp.upperext(), rewriter);
+                               combineOp.getUpperext(), rewriter);
           repResults.append(newOp.getResults().begin(),
                             newOp.getResults().end());
         }
@@ -726,21 +959,21 @@ struct CombineOpEmptyCleaner : public stencil::CombineOpPattern {
         return success();
       }
       // Remove the lower operands if the index is smaller than the lower bound
-      if (combineOp.getIndex() < shapeOp.getLB()[combineOp.dim()]) {
+      if (combineOp.getMyIndex() < shapeOp.getLB()[combineOp.getDim()]) {
         // Compute the replacement results
-        SmallVector<Value, 10> repResults = combineOp.upper();
+        SmallVector<Value, 10> repResults = combineOp.getUpper();
 
         // Introduce empty stores in case there are lower extra results
-        if (combineOp.lowerext().size() > 0) {
+        if (combineOp.getLowerext().size() > 0) {
           auto newOp =
               createEmptyApply(combineOp, std::numeric_limits<int64_t>::min(),
                                std::numeric_limits<int64_t>::max(),
-                               combineOp.lowerext(), rewriter);
+                               combineOp.getLowerext(), rewriter);
           repResults.append(newOp.getResults().begin(),
                             newOp.getResults().end());
         }
-        repResults.append(combineOp.upperext().begin(),
-                          combineOp.upperext().end());
+        repResults.append(combineOp.getUpperext().begin(),
+                          combineOp.getUpperext().end());
 
         // Replace the combine op
         rewriter.replaceOp(combineOp, repResults);
@@ -780,25 +1013,25 @@ struct CombineOpResCleaner : public stencil::CombineOpPattern {
         unsigned resultNumber = used.getResultNumber();
         // Copy the main operands
         if (auto num = combineOp.getLowerOperandNumber(resultNumber)) {
-          newLowerOperands.push_back(combineOp.lower()[num.getValue()]);
-          newUpperOperands.push_back(combineOp.upper()[num.getValue()]);
+          newLowerOperands.push_back(combineOp.getLower()[num.value()]);
+          newUpperOperands.push_back(combineOp.getUpper()[num.value()]);
         }
         // Copy the lower extra operands
         if (auto num = combineOp.getLowerExtraOperandNumber(resultNumber)) {
-          newLowerExtraOperands.push_back(combineOp.lowerext()[num.getValue()]);
+          newLowerExtraOperands.push_back(combineOp.getLowerext()[num.value()]);
         }
         // Copy the upper extra operands
         if (auto num = combineOp.getUpperExtraOperandNumber(resultNumber)) {
-          newUpperExtraOperands.push_back(combineOp.upperext()[num.getValue()]);
+          newUpperExtraOperands.push_back(combineOp.getUpperext()[num.value()]);
         }
       }
 
       // Create a new combine op that returns only the used results
       auto newOp = rewriter.create<stencil::CombineOp>(
-          combineOp.getLoc(), newResultTypes, combineOp.dim(),
-          combineOp.getIndex(), newLowerOperands, newUpperOperands,
-          newLowerExtraOperands, newUpperExtraOperands, combineOp.lbAttr(),
-          combineOp.ubAttr());
+          combineOp.getLoc(), newResultTypes, combineOp.getDim(),
+          combineOp.getMyIndex(), newLowerOperands, newUpperOperands,
+          newLowerExtraOperands, newUpperExtraOperands, combineOp.getLbAttr(),
+          combineOp.getUbAttr());
 
       // Compute the replacement results
       SmallVector<Value, 10> repResults(combineOp.getNumResults(),
@@ -834,7 +1067,7 @@ LogicalResult hoistForward(Operation *op, PatternRewriter &rewriter,
   // Skip compute operations
   auto curr = op;
   while (curr->getNextNode() && condition(curr->getNextNode()) &&
-         !curr->getNextNode()->isKnownTerminator())
+         !curr->getNextNode()->hasTrait<OpTrait::IsTerminator>())
     curr = curr->getNextNode();
 
   // Move the operation
@@ -890,28 +1123,28 @@ struct StoreOpHoisting : public OpRewritePattern<stencil::StoreOp> {
 } // end anonymous namespace
 
 // Register canonicalization patterns
-void stencil::ApplyOp::getCanonicalizationPatterns(
-    OwningRewritePatternList &results, MLIRContext *context) {
+void stencil::ApplyOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                   MLIRContext *context) {
   results.insert<ApplyOpArgCleaner, ApplyOpResCleaner, ApplyOpLoadCleaner>(
       context);
 }
 
-void stencil::CombineOp::getCanonicalizationPatterns(
-    OwningRewritePatternList &results, MLIRContext *context) {
+void stencil::CombineOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                     MLIRContext *context) {
   results.insert<CombineOpResCleaner, CombineOpEmptyCleaner,
                  CombineOpSymmetricCleaner>(context);
 }
 
-void stencil::CastOp::getCanonicalizationPatterns(
-    OwningRewritePatternList &results, MLIRContext *context) {
+void stencil::CastOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                  MLIRContext *context) {
   results.insert<CastOpHoisting>(context);
 }
-void stencil::LoadOp::getCanonicalizationPatterns(
-    OwningRewritePatternList &results, MLIRContext *context) {
+void stencil::LoadOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                  MLIRContext *context) {
   results.insert<LoadOpHoisting>(context);
 }
-void stencil::StoreOp::getCanonicalizationPatterns(
-    OwningRewritePatternList &results, MLIRContext *context) {
+void stencil::StoreOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                   MLIRContext *context) {
   results.insert<StoreOpHoisting>(context);
 }
 

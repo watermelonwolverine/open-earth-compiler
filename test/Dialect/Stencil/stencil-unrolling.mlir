@@ -34,8 +34,8 @@ func @index(%arg0 : f64, %arg1 : !stencil.field<?x?x?xf64>) attributes { stencil
     // CHECK: [[IDX3:%.*]] = stencil.index 2 [0, 2, 0] : index
     // CHECK: [[IDX4:%.*]] = stencil.index 2 [0, 3, 0] : index
     %2 = stencil.index 2 [0, 0, 0] : index
-    %3 = constant 20 : index
-    %4 = constant 0.0 : f64
+    %3 = arith.constant 20 : index
+    %4 = arith.constant 0.0 : f64
     %5 = cmpi "slt", %2, %3 : index
     %6 = select %5, %arg2, %4 : f64
     %7 = stencil.store_result %6 : (f64) -> !stencil.result<f64>

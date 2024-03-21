@@ -16,24 +16,24 @@ def ShapeOp : OpInterface<"ShapeOp"> {
     InterfaceMethod<"/*Get the lower bound of the operation*/",
       "Index", "getLB", (ins), [{
         Index result;
-        Optional<ArrayAttr> lb = $_op.lb();
-        for (auto &elem : lb.getValue()) 
+        std::optional<ArrayAttr> lb = $_op.getLb();
+        for (auto &elem : lb.value()) 
           result.push_back(elem.cast<IntegerAttr>().getValue().getSExtValue());
         return result;
     }]>,
     InterfaceMethod<"/*Get the upper bound of the operation*/",
       "Index", "getUB", (ins), [{
         Index result;
-        Optional<ArrayAttr> ub = $_op.ub();
-        for (auto &elem : ub.getValue()) 
+        std::optional<ArrayAttr> ub = $_op.getUb();
+        for (auto &elem : ub.value()) 
           result.push_back(elem.cast<IntegerAttr>().getValue().getSExtValue());
         return result;
     }]>,
     InterfaceMethod<"/*Clear the optional range attributes*/",
       "void", "clearInferredShape", (ins), [{
-        if(isOptionalArrayAttr($_op.lb()) && isOptionalArrayAttr($_op.ub())) {
-          $_op.removeAttr($_op.getLBAttrName());
-          $_op.removeAttr($_op.getUBAttrName());
+        if(isOptionalArrayAttr($_op.getLb()) && isOptionalArrayAttr($_op.getUb())) {
+          $_op->removeAttr($_op.getLBAttrName());
+          $_op->removeAttr($_op.getUBAttrName());
           // Update the result types
           for (auto result : $_op.getOperation()->getResults()) {
             auto oldType = result.getType().template cast<GridType>();
@@ -51,8 +51,8 @@ def ShapeOp : OpInterface<"ShapeOp"> {
         llvm::transform(ub, std::back_inserter(ubAttr), [&](int64_t x) {
           return IntegerAttr::get(IntegerType::get($_op.getContext(), 64), x);
         });
-        $_op.lbAttr(ArrayAttr::get(lbAttr, $_op.getContext()));
-        $_op.ubAttr(ArrayAttr::get(ubAttr, $_op.getContext()));
+        $_op.setLbAttr(ArrayAttr::get($_op.getContext(), lbAttr));
+        $_op.setUbAttr(ArrayAttr::get($_op.getContext(), ubAttr));
         // Update the result types
         for (auto result : $_op.getOperation()->getResults()) {
           auto oldType = result.getType().template cast<GridType>();
@@ -61,17 +61,17 @@ def ShapeOp : OpInterface<"ShapeOp"> {
     }]>,    
     InterfaceMethod<"/*Verify if the operation has valid bounds*/",
        "bool", "hasShape", (ins), [{
-        Optional<ArrayAttr> lb = $_op.lb();
-        Optional<ArrayAttr> ub = $_op.ub();
-        return lb.hasValue() && ub.hasValue();
+        std::optional<ArrayAttr> lb = $_op.getLb();
+        std::optional<ArrayAttr> ub = $_op.getUb();
+        return lb.has_value() && ub.has_value();
     }]>,   
     InterfaceMethod<"/*Get the rank of the operation*/",
       "unsigned", "getRank", (ins), [{
-        Optional<ArrayAttr> lb = $_op.lb();
-        Optional<ArrayAttr> ub = $_op.ub();
-        assert(lb.getValue().size() == ub.getValue().size() && 
+        std::optional<ArrayAttr> lb = $_op.getLb();
+        std::optional<ArrayAttr> ub = $_op.getUb();
+        assert(lb.value().size() == ub.value().size() && 
                "expected lower and upper bound to have the same rank");
-        return (unsigned)lb.getValue().size();
+        return (unsigned)lb.value().size();
     }]>,
     InterfaceMethod<"/*Update the argument types*/",
       "void", "updateArgumentTypes", (ins ), /*methodBody=*/[{}], [{
@@ -89,7 +89,7 @@ def OffsetOp : OpInterface<"OffsetOp"> {
     InterfaceMethod<"/*Get the offset of the operation*/",
       "Index", "getOffset", (ins), [{
         Index result;
-        ArrayAttr offset = $_op.offset();
+        ArrayAttr offset = $_op.getOffset();
         for (auto &elem : offset)
           result.push_back(elem.cast<IntegerAttr>().getValue().getSExtValue());
         return result;
@@ -107,13 +107,13 @@ def ShiftOp : OpInterface<"ShiftOp"> {
       "void", "shiftByOffset", (ins "ArrayRef<int64_t>":$offset), [{}],
         /*defaultImplementation=*/[{
         SmallVector<Attribute, kIndexSize> offsetAttr;
-        for (auto elem : llvm::zip(offset, $_op.offset())) {
+        for (auto elem : llvm::zip(offset, $_op.getOffset())) {
           offsetAttr.push_back(IntegerAttr::get(
               IntegerType::get($_op.getContext(), 64),
               std::get<1>(elem).template cast<IntegerAttr>().getValue().getSExtValue() + 
               std::get<0>(elem)));
         }
-        $_op.offsetAttr(ArrayAttr::get(offsetAttr, $_op.getContext()));
+        $_op.setOffsetAttr(ArrayAttr::get($_op.getContext(), offsetAttr));
     }]>,
   ];
 }
@@ -125,13 +125,13 @@ def ExtentOp : OpInterface<"ExtentOp"> {
   let methods = [
     InterfaceMethod<"/*Get the accessed temporary*/",
       "Value", "getTemp", (ins), [{
-        return $_op.temp();
+        return $_op.getTemp();
     }]>,
     InterfaceMethod<"/*Get the access extent*/",
       "std::tuple<Index, Index>", "getAccessExtent", (ins), [{}],
         /*defaultImplementation=*/[{
         Index result;
-        ArrayAttr offset = $_op.offset();
+        ArrayAttr offset = $_op.getOffset();
         for (auto &elem : offset.getValue())
           result.push_back(elem.cast<IntegerAttr>().getValue().getSExtValue());
         return std::make_tuple(result, result);

@@ -4,9 +4,8 @@
 #include "Dialect/Stencil/StencilTypes.h"
 #include "Dialect/Stencil/StencilUtils.h"
 #include "PassDetail.h"
-#include "mlir/Dialect/SCF/SCF.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
-#include "mlir/IR/BlockAndValueMapping.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
@@ -20,15 +19,15 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
-#include "mlir/Transforms/Utils.h"
+
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/None.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 
 using namespace mlir;
 using namespace stencil;
@@ -53,14 +52,14 @@ struct StencilInliningPattern : public ApplyOpPattern {
     // Do not inline producer ops that return void values
     bool containsEmptyStores = false;
     producerOp.walk([&](stencil::StoreResultOp resultOp) {
-      if (resultOp.operands().size() == 0)
+      if (resultOp.getOperands().size() == 0)
         containsEmptyStores = true;
     });
     if (containsEmptyStores)
       return false;
 
     // Do not inline producers accessed at dynamic offsets
-    for (auto operand : llvm::enumerate(consumerOp.operands())) {
+    for (auto operand : llvm::enumerate(consumerOp.getOperands())) {
       if (operand.value().getDefiningOp() == producerOp &&
           llvm::any_of(
               consumerOp.getBody()->getArgument(operand.index()).getUsers(),
@@ -99,8 +98,8 @@ struct RerouteRewrite : public StencilInliningPattern {
     // Clone the producer op
     rewriter.setInsertionPointAfter(producerOp);
     auto clonedOp = rewriter.cloneWithoutRegions(producerOp);
-    rewriter.inlineRegionBefore(producerOp.region(), clonedOp.region(),
-                                clonedOp.region().begin());
+    rewriter.inlineRegionBefore(producerOp.getRegion(), clonedOp.getRegion(),
+                                clonedOp.getRegion().begin());
 
     // Compute operand and result lists for the new consumer
     SmallVector<Value, 10> newOperands = consumerOp.getOperands();
@@ -126,8 +125,8 @@ struct RerouteRewrite : public StencilInliningPattern {
 
     // Create new consumer op right after the producer op
     auto newOp = rewriter.create<stencil::ApplyOp>(
-        consumerOp.getLoc(), newResultTypes, newOperands, consumerOp.lb(),
-        consumerOp.ub());
+        consumerOp.getLoc(), newResultTypes, newOperands, consumerOp.getLb(),
+        consumerOp.getUb());
     rewriter.mergeBlocks(consumerOp.getBody(), newOp.getBody(),
                          newOp.getBody()->getArguments().take_front(
                              consumerOp.getNumOperands()));
@@ -163,7 +162,7 @@ struct RerouteRewrite : public StencilInliningPattern {
                                  returnOp.getLoc(), arg, zeroOffset));
       retOperands.push_back(resultOp);
     }
-    rewriter.create<stencil::ReturnOp>(returnOp.getLoc(), retOperands, nullptr);
+    rewriter.create<stencil::ReturnOp>(returnOp.getLoc(), retOperands, std::optional<ArrayAttr>());
     rewriter.eraseOp(returnOp);
 
     // Compute the replacement values for the producer results
@@ -184,7 +183,7 @@ struct RerouteRewrite : public StencilInliningPattern {
   LogicalResult matchAndRewrite(stencil::ApplyOp applyOp,
                                 PatternRewriter &rewriter) const override {
     // Reroute input dependency
-    for (auto operand : applyOp.operands()) {
+    for (auto operand : applyOp.getOperands()) {
       if (operand.getDefiningOp()) {
         for (auto user : operand.getDefiningOp()->getUsers()) {
           // Only consider other apply operations
@@ -202,7 +201,7 @@ struct RerouteRewrite : public StencilInliningPattern {
       }
     }
     // Reroute output dependency
-    for (auto operand : applyOp.operands()) {
+    for (auto operand : applyOp.getOperands()) {
       if (auto producerOp =
               dyn_cast_or_null<stencil::ApplyOp>(operand.getDefiningOp())) {
         if (isStencilInliningPossible(producerOp, applyOp) &&
@@ -232,8 +231,8 @@ struct InliningRewrite : public StencilInliningPattern {
     // Create a build op to assemble the body of the inlined stencil
     auto loc = consumerOp.getLoc();
     auto buildOp = rewriter.create<stencil::ApplyOp>(
-        loc, consumerOp.getResultTypes(), buildOperands, consumerOp.lb(),
-        consumerOp.ub());
+        loc, consumerOp.getResultTypes(), buildOperands, consumerOp.getLb(),
+        consumerOp.getUb());
     rewriter.mergeBlocks(consumerOp.getBody(), buildOp.getBody(),
                          buildOp.getBody()->getArguments().take_back(
                              consumerOp.getNumOperands()));
@@ -253,9 +252,9 @@ struct InliningRewrite : public StencilInliningPattern {
     producerOp.walk([&](Operation *op) {
       // Remove the store result ops
       if (auto resultOp = dyn_cast<stencil::StoreResultOp>(op)) {
-        assert(resultOp.operands().size() == 1 &&
+        assert(resultOp.getOperands().size() == 1 &&
                "expected store result ops to store a value");
-        rewriter.replaceOp(resultOp, resultOp.operands());
+        rewriter.replaceOp(resultOp, resultOp.getOperands());
       }
       // Remove the result types from the signature of the if ops.
       if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
@@ -270,7 +269,7 @@ struct InliningRewrite : public StencilInliningPattern {
                           });
           rewriter.setInsertionPoint(ifOp);
           auto newOp = rewriter.create<scf::IfOp>(ifOp.getLoc(), newTypes,
-                                                  ifOp.condition(), true);
+                                                  ifOp.getCondition(), true);
           // All if operations returning a result have both results.
           rewriter.mergeBlocks(ifOp.getBody(0), newOp.getBody(0));
           rewriter.mergeBlocks(ifOp.getBody(1), newOp.getBody(1));
@@ -283,12 +282,12 @@ struct InliningRewrite : public StencilInliningPattern {
     DenseMap<Value, SmallVector<std::tuple<Index, Value>, 10>> inliningCache;
     rewriter.setInsertionPoint(buildOp);
     buildOp.walk([&](stencil::AccessOp accessOp) {
-      if (replacementIndex.count(accessOp.temp()) != 0) {
+      if (replacementIndex.count(accessOp.getTemp()) != 0) {
         // Get the shift offset
         Index offset = cast<OffsetOp>(accessOp.getOperation()).getOffset();
         // Check if the given producer offset has been inlined before
-        if (inliningCache.count(accessOp.temp()) != 0) {
-          for (auto it : inliningCache[accessOp.temp()]) {
+        if (inliningCache.count(accessOp.getTemp()) != 0) {
+          for (auto it : inliningCache[accessOp.getTemp()]) {
             if (std::get<0>(it) == offset &&
                 std::get<1>(it).getParentRegion()->isAncestor(
                     accessOp->getParentRegion())) {
@@ -302,18 +301,18 @@ struct InliningRewrite : public StencilInliningPattern {
         clonedOp.walk(
             [&](stencil::ShiftOp shiftOp) { shiftOp.shiftByOffset(offset); });
         // Merge into to build op and erase the clone
-        rewriter.mergeBlockBefore(clonedOp.getBody(), accessOp,
+        rewriter.inlineBlockBefore(clonedOp.getBody(), accessOp,
                                   buildOp.getBody()->getArguments().take_front(
                                       producerOp.getNumOperands()));
         rewriter.eraseOp(clonedOp);
         // Replace the access operation by the result of return operation
         auto returnOp =
             cast<stencil::ReturnOp>(accessOp.getOperation()->getPrevNode());
-        auto operand = returnOp.getOperand(replacementIndex[accessOp.temp()]);
+        auto operand = returnOp.getOperand(replacementIndex[accessOp.getTemp()]);
         rewriter.replaceOp(accessOp, operand);
         rewriter.eraseOp(returnOp);
         // Cache the result of the inlined producer
-        inliningCache[accessOp.temp()].push_back(
+        inliningCache[accessOp.getTemp()].push_back(
             std::make_tuple(offset, operand));
       }
     });
@@ -332,7 +331,7 @@ struct InliningRewrite : public StencilInliningPattern {
   LogicalResult matchAndRewrite(stencil::ApplyOp applyOp,
                                 PatternRewriter &rewriter) const override {
     // Search producer apply op
-    for (auto operand : applyOp.operands()) {
+    for (auto operand : applyOp.getOperands()) {
       if (auto producerOp =
               dyn_cast_or_null<stencil::ApplyOp>(operand.getDefiningOp())) {
         // Try the next producer if inlining the current one is not possible
@@ -349,18 +348,18 @@ struct InliningRewrite : public StencilInliningPattern {
 
 struct StencilInliningPass
     : public StencilInliningPassBase<StencilInliningPass> {
-  void runOnFunction() override;
+  void runOnOperation() override;
 };
 
-void StencilInliningPass::runOnFunction() {
-  FuncOp funcOp = getFunction();
+void StencilInliningPass::runOnOperation() {
+  func::FuncOp funcOp = getOperation();
   // Only run on functions marked as stencil programs
   if (!StencilDialect::isStencilProgram(funcOp))
     return;
 
   // Verify unrolling has not been executed
   auto result = funcOp.walk([&](stencil::ReturnOp returnOp) {
-    if (returnOp.unroll().hasValue()) {
+    if (returnOp.getUnroll().has_value()) {
       returnOp.emitOpError("execute stencil unrolling after stencil inlining");
       return WalkResult::interrupt();
     }
@@ -369,13 +368,16 @@ void StencilInliningPass::runOnFunction() {
   if (result.wasInterrupted())
     return signalPassFailure();
  
-  OwningRewritePatternList patterns;
+  RewritePatternSet patterns(&getContext());
   patterns.insert<InliningRewrite, RerouteRewrite>(&getContext());
+  #pragma clang diagnostic push
+  #pragma clang diagnostic ignored "-Wunused-value"
   applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+  #pragma clang diagnostic pop
 }
 
 } // namespace
 
-std::unique_ptr<OperationPass<FuncOp>> mlir::createStencilInliningPass() {
+std::unique_ptr<OperationPass<func::FuncOp>> mlir::stencil::createStencilInliningPass() {
   return std::make_unique<StencilInliningPass>();
 }

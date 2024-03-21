@@ -7,7 +7,7 @@ func @apply_arg(%arg0: !stencil.temp<?x?x?xf64>, %arg1: !stencil.temp<?x?x?xf64>
   %4 = stencil.apply (%arg2 = %arg0 : !stencil.temp<?x?x?xf64>, %arg3 = %arg0 : !stencil.temp<?x?x?xf64>, %arg4 = %arg1 : !stencil.temp<?x?x?xf64>) -> !stencil.temp<?x?x?xf64> {
     %6 = stencil.access %arg3[-1, 0, 0] : (!stencil.temp<?x?x?xf64>) -> f64
     %7 = stencil.access %arg2[0, -1, 0] : (!stencil.temp<?x?x?xf64>) -> f64
-    %8 = addf %6, %7 : f64
+    %8 = arith.addf %6, %7 : f64
     %9 = stencil.store_result %8 : (f64) -> !stencil.result<f64>
     stencil.return %9 : !stencil.result<f64>
   }
@@ -57,8 +57,8 @@ func @apply_load(%arg0: !stencil.field<?x?x?xf64>, %arg1: !stencil.field<?x?x?xf
     %6 = stencil.access %arg2[-1, 0, 0] : (!stencil.temp<66x64x64xf64>) -> f64
     %7 = stencil.access %arg3[0, 0, 0] : (!stencil.temp<64x64x64xf64>) -> f64
     %8 = stencil.access %arg4[0, 1, 0] : (!stencil.temp<64x66x64xf64>) -> f64
-    %9 = addf %6, %7 : f64
-    %10 = addf %9, %8 : f64
+    %9 = arith.addf %6, %7 : f64
+    %10 = arith.addf %9, %8 : f64
     %11 = stencil.store_result %10 : (f64) -> !stencil.result<f64>
     stencil.return %11 : !stencil.result<f64>
   } to ([0, 0, 0] : [64, 64, 64])
@@ -102,12 +102,12 @@ func @combine_res(%arg0: !stencil.field<?x?x?xf64>) attributes {stencil.program}
   // CHECK: [[VAL0:%.*]] = stencil.apply 
   // CHECK: [[VAL1:%.*]] = stencil.apply 
   %1, %2 = stencil.apply -> (!stencil.temp<32x64x60xf64>, !stencil.temp<32x64x60xf64>) {
-    %cst = constant 0.000000e+00 : f64
+    %cst = arith.constant 0.000000e+00 : f64
     %7 = stencil.store_result %cst : (f64) -> !stencil.result<f64>
     stencil.return %7, %7 : !stencil.result<f64>, !stencil.result<f64>
   } to ([0, 0, 0] : [32, 64, 60])
   %3, %4 = stencil.apply -> (!stencil.temp<32x64x60xf64>, !stencil.temp<32x64x60xf64>) {
-    %cst = constant 1.000000e+00 : f64
+    %cst = arith.constant 1.000000e+00 : f64
     %7 = stencil.store_result %cst : (f64) -> !stencil.result<f64>
     stencil.return %7, %7 : !stencil.result<f64>, !stencil.result<f64>
   } to ([32, 0, 0] : [64, 64, 60])
@@ -126,13 +126,13 @@ func @combine_empty(%arg0: !stencil.field<?x?x?xf64>, %arg1: !stencil.field<?x?x
   %2 = stencil.cast %arg2([-4, -4, -4] : [68, 68, 68]) : (!stencil.field<?x?x?xf64>) -> !stencil.field<72x72x72xf64>
   // CHECK: [[VAL0:%.*]]:2 = stencil.apply -> (!stencil.temp<64x64x60xf64>, !stencil.temp<64x64x60xf64>) {
   %3, %4 = stencil.apply -> (!stencil.temp<64x64x60xf64>, !stencil.temp<64x64x60xf64>) {
-    // CHECK: %{{.*}} = constant 0.000000e+00 : f64
-    %cst = constant 0.000000e+00 : f64
+    // CHECK: %{{.*}} = arith.constant 0.000000e+00 : f64
+    %cst = arith.constant 0.000000e+00 : f64
     %10 = stencil.store_result %cst : (f64) -> !stencil.result<f64>
     stencil.return %10, %10 : !stencil.result<f64>, !stencil.result<f64>
   } to ([0, 0, 0] : [64, 64, 60])
   %5, %6 = stencil.apply -> (!stencil.temp<?x?x?xf64>, !stencil.temp<?x?x?xf64>) {
-    %cst = constant 1.0 : f64
+    %cst = arith.constant 1.0 : f64
     %10 = stencil.store_result %cst : (f64) -> !stencil.result<f64>
     stencil.return %10, %10 : !stencil.result<f64>, !stencil.result<f64>
   } 
@@ -163,9 +163,9 @@ func @combine_symm(%arg0: !stencil.field<?x?x?xf64>, %arg1: !stencil.field<?x?x?
     stencil.return %7 : !stencil.result<f64>
   } to ([32, 0, 0] : [64, 64, 60])
   // CHECK: [[VAL0:%.*]] = stencil.apply -> !stencil.temp<64x64x60xf64> {
-  // CHECK-NEXT: %{{.*}} = constant 0.000000e+00 : f64
+  // CHECK-NEXT: %{{.*}} = arith.constant 0.000000e+00 : f64
   %4 = stencil.apply -> !stencil.temp<64x64x60xf64> {
-    %cst = constant 0.000000e+00 : f64
+    %cst = arith.constant 0.000000e+00 : f64
     %10 = stencil.store_result %cst : (f64) -> !stencil.result<f64>
     stencil.return %10 : !stencil.result<f64>
   // CHECK: } to ([0, 0, 0] : [64, 64, 60])
